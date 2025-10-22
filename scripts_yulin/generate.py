@@ -3,7 +3,7 @@
 
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
-model_local_path = "path_to_openPangu-Embedded-7B"
+model_local_path = "../../../dataset/models_yulin/openPangu-Embedded-7B-V1.1"
 
 
 # load the tokenizer and the model
