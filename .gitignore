@@ -1,3 +1,6 @@
+# Experiment
+*.zip
+
 # Python
 __pycache__/
 *.pyc

@@ -220,7 +220,7 @@ def infer_2(args):
         generated_responses = file_outputs[i]['generated_responses']
         generated_answers = [extract_answer(gr, args.data_name) for gr in generated_responses]
         is_correct_list = [check_is_correct(ga, gt_ans) for ga in generated_answers]
-        is_correct = any(is_correct_list)
+        is_correct = any(is_correct_list)  # TODO: if multiple responses exist, a single correct one marks the question correct
         if is_correct:
             correct_cnt += 1
         else:
@@ -277,20 +277,20 @@ def infer_2(args):
 
     test_num = len(file_outputs)
     for data in file_outputs:
-        text = _get_response_text(data)
+        text = _get_response_text(data)  # str
 
         # 整体词数
         response_length.append(len(text.split()) if text else 0)
 
         # 整段 token 数（保持你原口径；如需严格一致可设 add_special_tokens=False）
-        tokens_response_len = len(tokenizer(text)['input_ids']) if text else 0
+        tokens_response_len = len(tokenizer(text, add_special_tokens=False)['input_ids']) if text else 0  # TODO: need add_special_tokens=False
         token_num.append(tokens_response_len)
 
         # —— 以 </think> 边界截断；找不到则取全文 ——
         lower = text.lower() if text else ""
-        idx = lower.find("</think>")
-        if idx == -1:
-            idx = lower.find("&lt;/think&gt;")
+        idx = lower.find("[unused17]")  # ! adapt to pangu
+        # if idx == -1:
+        #     idx = lower.find("&lt;/think&gt;")
 
         if idx != -1:
             think_text = text[:idx]
@@ -311,9 +311,14 @@ def infer_2(args):
     print("length:", avg_response_length)
     print("token_num:", avg_token_num)
     print("think_token_num:", avg_think_token_num)
-    print(f"think blocks found by </think>: {think_found}/{test_num} (fallback_full={fallback_full})")
+    print(f"think blocks found by [unused17]: {think_found}/{test_num} (fallback_full={fallback_full})")
 
 if __name__ == "__main__":
     args = parse_args()
-    tokenizer = AutoTokenizer.from_pretrained(args.model_name_or_path)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path,
+        use_fast=False,
+        trust_remote_code=True,
+        local_files_only=True
+    )
     infer_2(args)
