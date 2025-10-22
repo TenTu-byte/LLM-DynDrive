@@ -68,7 +68,7 @@ def main():
                 items_wo_idx.append(obj)
 
     # sort by idx; keep wo_idx in append order
-    items_with_idx.sort(key=lambda x: x[0])
+    items_with_idx.sort(key=lambda x: x[0])  # TODO: the use of sort here makes the earlier one redundant
     merged_objs = [o for _, o in items_with_idx] + items_wo_idx
 
     out_path = args.out or os.path.join(args.dir, f"{args.base}.merged.jsonl")

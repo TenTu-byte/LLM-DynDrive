@@ -1,11 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-OOM-hardened data-parallel inference with hidden-state alignment fixes:
-  • 保留你的所有逻辑（model/tokenizer加载、采样、置信度计算、shard格式等）
-  • 修复 hidden_state 失败后 JSON 已写导致永远缺失的问题（自动救援补写）
-  • save_qwen2_think_split_tokens_only CPU 兜底+设备还原+原子保存
-  • 先 hidden 后 JSON，hidden 失败下次自动补写
-
+使用torchrun兼容单机多卡与多节点data paralle
 """
 
 import warnings
@@ -22,6 +17,7 @@ import gc
 import torch
 import torch.nn.functional as F
 import torch.multiprocessing as mp
+import torch.distributed as dist
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
@@ -136,7 +132,7 @@ def load_model_and_tokenizer_single_npu(args, device):
         args.model_name_or_path,
         trust_remote_code=args.trust_remote_code,
         torch_dtype="auto",
-        device_map="npu",
+        device_map=None,  # 关键：不要让 HF 自己做多设备切分
         local_files_only=True
     )
 
@@ -156,7 +152,7 @@ def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, s
 
     ids_flat = input_ids[0].tolist()
     tokens = tokenizer.convert_ids_to_tokens(input_ids[0])  # TODO: change to tokenizer.decode()?
-    think_ids = tokenizer.encode("[unused17]", add_special_tokens=False)  # ! adapt to pangu
+    think_ids = tokenizer.encode("</think>", add_special_tokens=False)  # TODO: change to tokenizer(["</think>"], , add_special_tokens=False)?
 
     def _find_subseq(seq, subseq):
         if not subseq:
@@ -173,11 +169,11 @@ def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, s
     step_positions = []
     for i in range(think_end_idx - 1):
         tok = tokens[i]
-        next_tok = tokens[i + 1] if i + 1 < think_end_idx - 1 else ""  # using think_end_idx - 1 here allows next_tok to be empty
-        if "\n\n" in tok and "\n\n" not in next_tok:  # ! adpat to pangu
-            step_positions.append(i + 1)
+        if tok == ".ĊĊ" or tok == "ĊĊ" or ("ĊĊ" in tok):
+            step_positions.append(i + 1)  # TODO: why + 1 here?
 
     hidden_dict = {}
+    sample_id = 0
 
     def _forward_on(device):
         with torch.inference_mode():
@@ -190,7 +186,7 @@ def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, s
                 step_h = h.index_select(dim=0, index=idx).to('cpu', non_blocking=True)
             else:
                 step_h = torch.empty((0, h.shape[1]), dtype=h.dtype)
-            hidden_dict[layer_id] = step_h  # simplify the dict structure
+            hidden_dict[layer_id] = {sample_id: {"step": step_h}}
 
     orig_device = next(model.parameters()).device
     try:
@@ -215,8 +211,6 @@ def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, s
     tmp_path = save_path + ".tmp"
     torch.save(hidden_dict, tmp_path)
     _os.replace(tmp_path, save_path)
-
-    return len(step_positions)
 
 
 # ------------------------
@@ -275,30 +269,33 @@ def _reconstruct_full_text(tokenizer, sys_prompt, question_text, response_text):
 # ------------------------
 # Worker
 # ------------------------
-
 def worker(rank, world_size, args):
-    # set_seeds(42 + rank)
+    # torchrun 下：rank=global_rank；LOCAL_RANK=本机卡号
+    # 用 LOCAL_RANK 设设备，用 global rank 做切分与命名
+    local_rank = int(os.environ.get("LOCAL_RANK", 0))
     if torch.npu.is_available():
-        torch.npu.set_device(rank)
-    device = torch.device(f"npu:{rank}" if torch.npu.is_available() else "cpu")
+        torch.npu.set_device(local_rank)
+        device = torch.device(f"npu:{local_rank}")
+    else:
+        device = torch.device("cpu")
 
-    # Use train.jsonl and limit to 500 samples for Math_Math; otherwise use test.jsonl
-    dataset_file = 'train.jsonl' if args.dataset == 'Math_Math' else 'test.jsonl'
-    dataset_path = os.path.join(args.dataset_dir, args.dataset, dataset_file)
+    dataset_path = os.path.join(args.dataset_dir, args.dataset, 'test.jsonl')
     questions = read_jsonl(dataset_path)
-    if args.dataset == 'Math_Math':
-        questions = questions[:500]
 
     model_basename = os.path.basename(os.path.normpath(args.model_name_or_path))
     output_dir = os.path.join(args.output_path, model_basename, args.dataset)
     os.makedirs(output_dir, exist_ok=True)
     base_name = f'origin_temp{args.temperature}_maxlen{args.max_generated_tokens}'
+    
+    # 用 global_rank 命名，避免多机冲突
     shard_file = os.path.join(output_dir, f'{base_name}.shard{rank:03d}.jsonl')
 
     existing_idx, existing_q, num_lines = load_existing_indices(shard_file)
     existing_map = _read_jsonl_map_by_idx(shard_file)
 
     model, tokenizer = load_model_and_tokenizer_single_npu(args, device)
+
+    # 全局切分：确保不同机器/卡互不重叠
     my_indices = [i for i in range(len(questions)) if (i % world_size) == rank]
 
     print(f"[rank {rank}] world_size={world_size}")
@@ -312,7 +309,7 @@ def worker(rank, world_size, args):
 
     for i in my_indices:
         q = questions[i]
-        hidden_save_path = os.path.join(output_dir, f"hidden_{i:03}.pt")
+        hidden_save_path = os.path.join(output_dir, f"hidden_{i}.pt")
 
         if (i in existing_idx) or (q.get("problem") in existing_q):
             if not os.path.exists(hidden_save_path):
@@ -321,8 +318,8 @@ def worker(rank, world_size, args):
                     if entry and entry.get("generated_responses"):
                         response_text = entry["generated_responses"][0] if entry["generated_responses"] else ""
                         full_text = _reconstruct_full_text(tokenizer, sys_prompt, q.get("problem", ""), response_text)
-                        full_inputs = tokenizer(full_text, return_tensors="pt").to(device)
-                        step_hidden_num = save_pangu_think_split_tokens_only(
+                        full_inputs = tokenizer([full_text], return_tensors="pt").to(device)
+                        save_pangu_think_split_tokens_only(
                             model, tokenizer, full_inputs.input_ids.to(device), full_text, hidden_save_path,
                             hs_device=args.hs_device
                         )
@@ -340,8 +337,6 @@ def worker(rank, world_size, args):
             {"role": "user", "content": q['problem']}
         ]
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
-        # ! With `return_tensors="pt"`, `input_ids` are always 2D, brackets or not;
-        # ! without it, they're 1D without brackets, 2D with brackets.
         inputs = tokenizer([prompt], return_tensors="pt").to(device)
 
         try:
@@ -353,7 +348,7 @@ def worker(rank, world_size, args):
                     top_p=args.top_p,
                     max_new_tokens=args.max_generated_tokens,
                     return_dict_in_generate=True,
-                    eos_token_id=tokenizer.eos_token_id
+                    eos_token_id=45892
                 )
         except torch.npu.OutOfMemoryError:
             _clear_npu()
@@ -365,15 +360,15 @@ def worker(rank, world_size, args):
             pbar.update(1)
             continue
 
-        response_text = tokenizer.decode(  # str
+        response_text = tokenizer.decode(
             output.sequences[0][inputs.input_ids.shape[1]:],
-            skip_special_tokens=True
+            skip_special_tokens=True  # TODO: whether to skip? If skip, will there still be </think>?
         )
         full_text = prompt + response_text
 
-        gen_token_ids = output.sequences[0][inputs.input_ids.shape[1]:].detach().cpu()  # tensor [4316]
+        gen_token_ids = output.sequences[0][inputs.input_ids.shape[1]:].detach().cpu()
         try:
-            gen_logps = compute_token_logprobs_streaming(  # tensor [4316]
+            gen_logps = compute_token_logprobs_streaming(
                 model, tokenizer,
                 prompt_ids=inputs.input_ids,
                 gen_ids=gen_token_ids,
@@ -387,30 +382,14 @@ def worker(rank, world_size, args):
             print(f"[WARN][rank {rank}] logprob pass failed at idx={i}: {e}")
             gen_logps = torch.empty(0)
 
-        text_before_think = response_text.split('[unused17]')[0]
-        tokens_before_think = tokenizer.tokenize(text_before_think)
-
-        token_segments = []  # len=157
-        current_segment = []
-        for token in tokens_before_think:
-            if "\n\n" in token:
-                if current_segment:
-                    token_segments.append(current_segment)
-                    current_segment = []
-            else:
-                current_segment.append(token)
-
-        # add the last segment (if exists)
-        if current_segment:
-            token_segments.append(current_segment)
-        
-        confidences = []  # list len=157
+        text_before_think = response_text.split('</think>')[0]  # TODO: once skipped, will there still be </think>
+        text_segments = rsplit(r'\n\n+', text_before_think)
+        confidences = []
         start = 0
-        # TODO: token and logp are misaligned (logp contains \n\n not in segment).
-        for segment in token_segments:
-            seg_ids = tokenizer.convert_tokens_to_ids(segment)
+        for segment in text_segments:
+            seg_ids = tokenizer([segment], add_special_tokens=False).input_ids
             end = start + len(seg_ids)
-            if gen_logps.numel() > 0 and end > start and end <= gen_logps.numel():  # TODO: gen_logps is not splitted by [unused17]
+            if gen_logps.numel() > 0 and end > start and end <= gen_logps.numel():
                 seg_logps = gen_logps[start:end]
                 conf = _summarize_selected_logprobs(seg_logps, policy='avg2')
                 confidences.append(conf)
@@ -420,8 +399,8 @@ def worker(rank, world_size, args):
 
         try:
             if not os.path.exists(hidden_save_path):
-                full_inputs = tokenizer(full_text, return_tensors="pt")
-                step_hidden_num = save_pangu_think_split_tokens_only(  # step_hidden_num=156
+                full_inputs = tokenizer([full_text], return_tensors="pt")
+                save_pangu_think_split_tokens_only(
                     model, tokenizer, full_inputs.input_ids.to(device), full_text, hidden_save_path,
                     hs_device=args.hs_device
                 )
@@ -440,8 +419,6 @@ def worker(rank, world_size, args):
             "generated_responses": [response_text],
             "gold_answer": q.get("answer", ""),
             "sentence_confidences": confidences,
-            "confidence_num": len(confidences),
-            "step_hidden_num": step_hidden_num
         }
         with open(shard_file, 'a', encoding='utf-8') as fout:
             fout.write(json.dumps(result_entry, ensure_ascii=False) + '\n')
@@ -473,11 +450,17 @@ def main():
     parser.add_argument('--score_dtype', type=str, default='bf16', choices=['bf16', 'fp16', 'fp32'])
     args = parser.parse_args()
 
-    world_size = max(1, int(args.num_npus))
-    if world_size == 1:
-        worker(0, 1, args)
-    else:
-        mp.spawn(worker, nprocs=world_size, args=(world_size, args))
+    backend = "hccl" if torch.npu.is_available() else ("nccl" if torch.cuda.is_available() else "gloo")
+    dist.init_process_group(backend=backend, init_method="env://")
+
+    global_rank = dist.get_rank()
+    world_size = dist.get_world_size()
+
+    try:
+        worker(global_rank, world_size, args)
+    finally:
+        dist.barrier()
+        dist.destroy_process_group()
 
 
 if __name__ == "__main__":
