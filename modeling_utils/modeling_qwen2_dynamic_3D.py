@@ -817,10 +817,12 @@ class Qwen2Model(Qwen2PreTrainedModel):
         output_hidden_states: Optional[bool] = None,
         return_dict: Optional[bool] = None,
         cache_position: Optional[torch.LongTensor] = None,
+        # ! ------ steering ------
         steering_flag: Optional[torch.BoolTensor] = None,
         steering_vector: Optional[torch.FloatTensor] = None,
         steering_layer: Optional[int] = None,
         steering_coef: Optional[float] = 0.0,
+        # ! ------ steering ------
     ) -> Union[Tuple, BaseModelOutputWithPast]:
         output_attentions = output_attentions if output_attentions is not None else self.config.output_attentions
         output_hidden_states = (
@@ -880,6 +882,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
         next_decoder_cache = None
 
         for l, decoder_layer in enumerate(self.layers):
+            # ! ------ steering ------
             if steering_flag is not None and steering_layer == l:
                 steering_vector = steering_vector.to(hidden_states.dtype).to(hidden_states.device)
                 steering_flag = steering_flag.to(hidden_states.device)
@@ -889,6 +892,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
                 else:
                     coef = torch.as_tensor(steering_coef, dtype=hidden_states.dtype, device=hidden_states.device)
                 hidden_states[steering_flag, -1] += coef * steering_vector
+            # ! ------ steering ------
 
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -927,6 +931,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
 
         hidden_states = self.norm(hidden_states)
 
+        # ! ------ steering ------
         if steering_flag is not None and steering_layer == len(self.layers):
             steering_vector = steering_vector.to(hidden_states.dtype).to(hidden_states.device)
             steering_flag = steering_flag.to(hidden_states.device)
@@ -935,6 +940,7 @@ class Qwen2Model(Qwen2PreTrainedModel):
             else:
                 coef = torch.as_tensor(steering_coef, dtype=hidden_states.dtype, device=hidden_states.device)
             hidden_states[steering_flag, -1] += coef * steering_vector
+        # ! ------ steering ------
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -1107,6 +1113,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
 
+        # ! ------ steering ------
         self.new_round=False
         self.cur_steps = 0
 
@@ -1132,10 +1139,12 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self._step_prob_sum = None      # sum of max-prob within a segment
         self._step_tok_count = None     # token count within a segment
         self._last_maxprob = None       # max-prob of the last token from previous step
+        # ! ------ steering ------
 
         # Initialize weights and apply final processing
         self.post_init()
 
+    # ! ------ steering ------
     def set_steering_flag(self, steering_flag, steering_layer=None, steer_vec=None,  steer_coef=0.0, tokenizer=None):
         self.steering_flag = steering_flag
         self.steering_vector = steer_vec
@@ -1164,6 +1173,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         self.new_round=True
         self.cur_steps = 0
         self.steering_think_flag=None
+    # ! ------ steering ------
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -1238,6 +1248,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
         )
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
+        # ! ------ steering ------
         if self.steering_flag:
             if self.new_round:
                 self.new_round=False
@@ -1413,6 +1424,7 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             current_coef = self._coefs
         else:
             current_coef = torch.as_tensor(float(self.steering_coef), dtype=torch.float32, device=input_ids.device)
+        # ! ------ steering ------
 
         # decoder outputs consists of (dec_features, layer_state, dec_hidden, dec_attn)
         outputs = self.model(
@@ -1426,23 +1438,26 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
             output_hidden_states=output_hidden_states,
             return_dict=return_dict,
             cache_position=cache_position,
+            # ! ------ steering ------
             steering_flag=steering_flag,
             steering_vector=self.steering_vector,
             steering_layer=self.steering_layer,
             steering_coef=current_coef,
+            # ! ------ steering ------
         )
 
         hidden_states = outputs[0]
         # Only compute necessary logits, and do not upcast them to float if we are not computing the loss
         logits = self.lm_head(hidden_states[:, -num_logits_to_keep:, :])
 
-
-
+        # ! ------ steering ------
         # cache last-step max probability for dynamic update on the next step
         if self.steering_flag and getattr(self, "_dyn_enabled", True):
             with torch.no_grad():
                 probs = torch.softmax(logits[:, -1, :], dim=-1)
                 self._last_maxprob = probs.max(dim=-1).values
+        # ! ------ steering ------
+
         loss = None
         if labels is not None:
             loss = self.loss_function(logits, labels, self.vocab_size, **loss_kwargs)
