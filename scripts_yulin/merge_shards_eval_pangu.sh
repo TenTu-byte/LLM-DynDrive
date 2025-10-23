@@ -12,17 +12,27 @@ cd ${PROJECT_DIR}
 
 datasets=(
     Math_AIME2024
-    Math_Math500
-    Math_AIME2025
-    Math_AMC23
+    # Math_Math500
+    # Math_AIME2025
+    # Math_AMC23
     # Math_GSM8K
     # Math_Olympiad
 )
 
+# Dynamic steering
+# for ds in "${datasets[@]}"; do
+#     echo "=== Merging dataset: ${ds} ==="
+#     python merge_shards.py \
+#         --dir "$DATASET_DIR/outputs_yulin/outputs_steer_dynamic/openPangu-Embedded-7B-V1.1/${ds}"\
+#         --base 'steer_temp0.7_maxlen16000'
+#     echo "=== Finished ${ds} ==="
+# done
+
+# Baseline
 for ds in "${datasets[@]}"; do
     echo "=== Merging dataset: ${ds} ==="
     python merge_shards.py \
-        --dir "$DATASET_DIR/outputs_yulin/outputs_steer_dynamic/openPangu-Embedded-7B-V1.1/${ds}"\
-        --base 'steer_temp0.7_maxlen16000'
+        --dir "$DATASET_DIR/outputs_yulin/outputs_baseline/openPangu-Embedded-7B-V1.1/${ds}"\
+        --base 'origin_temp0.7_maxlen16000'
     echo "=== Finished ${ds} ==="
 done
