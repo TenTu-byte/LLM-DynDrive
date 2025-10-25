@@ -1,6 +1,13 @@
 # -*- coding: utf-8 -*-
 """
-使用torchrun兼容单机多卡与多节点data paralle
+OOM-hardened multi-node data-parallel inference with hidden-state alignment fixes:
+  • 多节点/多卡分布式 (torch.distributed, HCCL on NPU)
+  • DistributedSampler 自动数据分发（不再手写取模）
+  • 各 rank 写 shard；rank 0 自动合并汇总（去重、排序）
+  • 保留你的所有逻辑（model/tokenizer加载、采样、置信度、shard格式等）
+  • 修复 hidden_state 失败后 JSON 已写导致永远缺失的问题（自动救援补写，扫描全量/分片）
+  • save_pangu_think_split_tokens_only CPU 兜底+设备还原+原子保存
+  • 先 hidden 后 JSON，hidden 失败下次自动补写；step_hidden_num 始终有定义
 """
 
 import warnings
@@ -14,10 +21,11 @@ import json
 import argparse
 import sys
 import gc
+import glob
 import torch
 import torch.nn.functional as F
-import torch.multiprocessing as mp
 import torch.distributed as dist
+from torch.utils.data.distributed import DistributedSampler
 
 from transformers import AutoTokenizer, AutoModelForCausalLM
 from tqdm import tqdm
@@ -25,6 +33,7 @@ import numpy as np
 import random
 from typing import List
 from re import split as rsplit
+from contextlib import nullcontext
 
 
 # ------------------------
@@ -33,9 +42,11 @@ from re import split as rsplit
 
 def write_jsonl(data, file_path):
     os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    with open(file_path, 'w', encoding='utf-8') as f:
+    tmp = file_path + ".tmp"
+    with open(tmp, 'w', encoding='utf-8') as f:
         for item in data:
             f.write(json.dumps(item, ensure_ascii=False) + '\n')
+    os.replace(tmp, file_path)
 
 
 def read_jsonl(file_path):
@@ -50,25 +61,95 @@ def set_seeds(seed=42):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-    if torch.npu.is_available():
+    if hasattr(torch, "npu") and torch.npu.is_available():
         torch.npu.manual_seed_all(seed)
+        # 以下两行对 NPU/Ascend 不是必须，但沿用你的设置
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
-        torch.set_float32_matmul_precision("high")
+        try:
+            torch.set_float32_matmul_precision("high")
+        except Exception:
+            pass
 
 
 def _clear_npu():
-    if torch.npu.is_available():
+    if hasattr(torch, "npu") and torch.npu.is_available():
         try:
             torch.npu.synchronize()
         except Exception:
             pass
-        torch.npu.empty_cache()
         try:
-            torch.npu.ipc_collect()  # Inter-Process Communication
+            torch.npu.empty_cache()
         except Exception:
             pass
-    gc.collect()  # Garbage Collection
+        try:
+            torch.npu.ipc_collect()
+        except Exception:
+            pass
+    gc.collect()
+
+
+def _clear_cuda():
+    if torch.cuda.is_available():
+        try:
+            torch.cuda.synchronize()
+        except Exception:
+            pass
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+        try:
+            torch.cuda.ipc_collect()
+        except Exception:
+            pass
+    gc.collect()
+
+
+def _clear_device():
+    _clear_npu()
+    _clear_cuda()
+
+# ------------------------
+# Distributed helpers
+# ------------------------
+
+def _auto_backend():
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        return "hccl"   # Ascend NPU
+    if torch.cuda.is_available():
+        return "nccl"   # NVIDIA GPU
+    return "gloo"       # CPU fallback
+
+
+def init_distributed_if_needed():
+    """使用 torchrun 跨节点启动时通过 env:// 初始化；否则单进程回退。"""
+    # Automatically set by torchrun
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    is_dist = world_size > 1
+    rank = 0
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+
+    if is_dist and not dist.is_initialized():
+        backend = _auto_backend()
+        dist.init_process_group(backend=backend, init_method="env://")  # use environment variables
+        rank = dist.get_rank()
+        world_size = dist.get_world_size()
+    else:
+        world_size = 1
+        rank = 0
+
+    # 设备
+    if hasattr(torch, "npu") and torch.npu.is_available():
+        torch.npu.set_device(local_rank)  # default device
+        device = torch.device(f"npu:{local_rank}")
+    elif torch.cuda.is_available():
+        torch.cuda.set_device(local_rank)
+        device = torch.device(f"cuda:{local_rank}")
+    else:
+        device = torch.device("cpu")
+
+    return is_dist, rank, world_size, local_rank, device
 
 
 # ------------------------
@@ -86,8 +167,7 @@ def _summarize_selected_logprobs(selected_logprobs: torch.Tensor, policy: str = 
     return torch.exp(selected_logprobs.mean()).item()
 
 
-def compute_token_logprobs_streaming(model, tokenizer, prompt_ids: torch.Tensor, gen_ids: torch.Tensor,
-                                     device: torch.device, score_dtype: str = 'bf16') -> torch.Tensor:
+def compute_token_logprobs_streaming(model, tokenizer, prompt_ids: torch.Tensor, gen_ids: torch.Tensor, split_ids: torch.Tensor, device: torch.device, score_dtype: str = 'bf16') -> torch.Tensor:
     assert prompt_ids.ndim == 2 and prompt_ids.size(0) == 1
     assert gen_ids.ndim == 1
 
@@ -95,22 +175,34 @@ def compute_token_logprobs_streaming(model, tokenizer, prompt_ids: torch.Tensor,
     amp_dtype = dtype_map.get(score_dtype, torch.bfloat16)
 
     logps = []
-    with torch.inference_mode(), torch.npu.amp.autocast(enabled=(device.type == 'npu'), dtype=amp_dtype):
+    split_ids_set = set(split_ids.tolist())
+
+    if device.type == 'npu' and hasattr(torch, "npu"):
+        autocast_ctx = torch.npu.amp.autocast(enabled=True, dtype=amp_dtype)
+    elif device.type == 'cuda':
+        autocast_ctx = torch.cuda.amp.autocast(enabled=True, dtype=amp_dtype)
+    else:
+        autocast_ctx = nullcontext()
+
+    with torch.inference_mode(), autocast_ctx:
+        # 首 token
         out = model(prompt_ids.to(device), use_cache=True, return_dict=True)
         past = out.past_key_values
         logits = out.logits[:, -1, :]
-        # TODO: what is calculated here is the probability of the sampled token, rather than the maximum probability
-        logprob0 = F.log_softmax(logits, dim=-1)[0, gen_ids[0].to(device)].item()
-        logps.append(logprob0)
+        if gen_ids[0].item() not in split_ids_set:
+            logprob0 = F.log_softmax(logits, dim=-1)[0, gen_ids[0].to(device)].item()
+            logps.append(logprob0)
 
         if gen_ids.numel() > 1:
             prev = gen_ids[0].view(1, 1).to(device)
+            # TODO: discard the non-thinking sequence
             for t in range(1, gen_ids.numel()):
                 out = model(prev, use_cache=True, past_key_values=past, return_dict=True)
                 past = out.past_key_values
                 logits = out.logits[:, -1, :]
-                lp = F.log_softmax(logits, dim=-1)[0, gen_ids[t].to(device)].item()
-                logps.append(lp)
+                if gen_ids[t].item() not in split_ids_set:
+                    lp = F.log_softmax(logits, dim=-1)[0, gen_ids[t].to(device)].item()
+                    logps.append(lp)
                 prev = gen_ids[t].view(1, 1).to(device)
 
     return torch.tensor(logps, dtype=torch.float32)
@@ -132,13 +224,11 @@ def load_model_and_tokenizer_single_npu(args, device):
         args.model_name_or_path,
         trust_remote_code=args.trust_remote_code,
         torch_dtype="auto",
-        device_map=None,  # 关键：不要让 HF 自己做多设备切分
         local_files_only=True
     )
 
     model.to(device)
     model.eval()
-
     return model, tokenizer
 
 
@@ -146,13 +236,11 @@ def load_model_and_tokenizer_single_npu(args, device):
 # Hidden-state saving (修复版)
 # ------------------------
 
-def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, save_path,
-                                       hs_device: str = 'auto'):
+def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, save_path, think_end_id, split_ids, hs_device: str = 'auto'):
     import os as _os
 
     ids_flat = input_ids[0].tolist()
-    tokens = tokenizer.convert_ids_to_tokens(input_ids[0])  # TODO: change to tokenizer.decode()?
-    think_ids = tokenizer.encode("</think>", add_special_tokens=False)  # TODO: change to tokenizer(["</think>"], , add_special_tokens=False)?
+    tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
 
     def _find_subseq(seq, subseq):
         if not subseq:
@@ -163,17 +251,16 @@ def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, s
                 return s
         return None
 
-    pos = _find_subseq(ids_flat, think_ids)
+    pos = _find_subseq(ids_flat, [think_end_id])
     think_end_idx = pos if pos is not None else len(ids_flat)
 
     step_positions = []
+    split_ids_set = set(split_ids.tolist())
     for i in range(think_end_idx - 1):
-        tok = tokens[i]
-        if tok == ".ĊĊ" or tok == "ĊĊ" or ("ĊĊ" in tok):
-            step_positions.append(i + 1)  # TODO: why + 1 here?
+        if ids_flat[i] in split_ids_set and ids_flat[i + 1] not in split_ids_set:
+            step_positions.append(i + 1)
 
     hidden_dict = {}
-    sample_id = 0
 
     def _forward_on(device):
         with torch.inference_mode():
@@ -182,15 +269,17 @@ def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, s
         for layer_id, layer_h in enumerate(hidden_states):
             h = layer_h.squeeze(0)
             if len(step_positions) > 0:
-                idx = torch.tensor(step_positions, dtype=torch.long, device=h.device)  # TODO: extract the next token of /n/n?
+                idx = torch.tensor(step_positions, dtype=torch.long, device=h.device)
                 step_h = h.index_select(dim=0, index=idx).to('cpu', non_blocking=True)
             else:
                 step_h = torch.empty((0, h.shape[1]), dtype=h.dtype)
-            hidden_dict[layer_id] = {sample_id: {"step": step_h}}
+            hidden_dict[layer_id] = step_h
 
     orig_device = next(model.parameters()).device
     try:
-        if hs_device in ('auto', 'npu') and torch.npu.is_available():
+        if hs_device in ('auto', 'npu') and hasattr(torch, "npu") and torch.npu.is_available():
+            _forward_on(orig_device)
+        elif hs_device in ('auto', 'cuda') and torch.cuda.is_available():
             _forward_on(orig_device)
         else:
             if orig_device.type != 'cpu':
@@ -198,11 +287,20 @@ def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, s
             _forward_on(torch.device('cpu'))
     except torch.npu.OutOfMemoryError:
         print("[hs][npu OOM] falling back to CPU for hidden-state dump...")
-        _clear_npu()  # TODO: clean up NPU cache here actually doesn't have much effect?
-        if hs_device == 'npu':
+        if hasattr(torch, "npu") and torch.npu.is_available():
+            _clear_npu()
+        if hs_device == 'npu' or 'cuda':
             raise
         model.to('cpu')
         _forward_on(torch.device('cpu'))
+    # except torch.cuda.OutOfMemoryError:
+    #     print("[hs][cuda OOM] falling back to CPU for hidden-state dump...")
+    #     if torch.cuda.is_available():
+    #         _clear_cuda()
+    #     if hs_device == 'npu' or 'cuda':
+    #         raise
+    #     model.to('cpu')
+    #     _forward_on(torch.device('cpu'))
     finally:
         if next(model.parameters()).device != orig_device:
             model.to(orig_device)
@@ -211,18 +309,19 @@ def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, s
     tmp_path = save_path + ".tmp"
     torch.save(hidden_dict, tmp_path)
     _os.replace(tmp_path, save_path)
+    return len(step_positions)
 
 
 # ------------------------
 # Shard helpers
 # ------------------------
 
-def load_existing_indices(shard_file):
+def load_existing_indices(file_path):
     existing_idx = set()
     existing_q = set()
     num_lines = 0
-    if os.path.exists(shard_file):
-        with open(shard_file, 'r', encoding='utf-8') as f:
+    if os.path.exists(file_path):
+        with open(file_path, 'r', encoding='utf-8') as f:
             for line in f:
                 s = line.strip()
                 if not s:
@@ -257,6 +356,47 @@ def _read_jsonl_map_by_idx(file_path):
     return m
 
 
+def scan_existing_outputs(output_dir, base_name):
+    """
+    扫描总表 + 各分片, 汇总已有的 idx 与 question, 构建 idx->obj / q->obj。
+    便于：重复运行时的 hidden 救援、重复样本跳过、最终合并去重。
+    """
+    combined = os.path.join(output_dir, f'{base_name}.jsonl')
+    shard_glob = os.path.join(output_dir, f'{base_name}.shard*.jsonl')
+
+    files = []
+    if os.path.exists(combined):
+        files.append(combined)
+    files += sorted(glob.glob(shard_glob))
+
+    idx_set, q_set = set(), set()
+    idx_map, q_map = {}, {}
+    total = 0
+
+    for fp in files:
+        with open(fp, 'r', encoding='utf-8') as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                total += 1
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    continue
+                i = obj.get("idx", None)
+                q = obj.get("question", None)
+                if isinstance(i, int):
+                    if i not in idx_map:
+                        idx_map[i] = obj
+                    idx_set.add(i)
+                if isinstance(q, str):
+                    if q not in q_map:
+                        q_map[q] = obj
+                    q_set.add(q)
+    return idx_set, q_set, idx_map, q_map, total
+
+
 def _reconstruct_full_text(tokenizer, sys_prompt, question_text, response_text):
     messages = [
         {"role": "system", "content": sys_prompt},
@@ -266,77 +406,132 @@ def _reconstruct_full_text(tokenizer, sys_prompt, question_text, response_text):
     return prompt + (response_text or "")
 
 
+def merge_all_shards(output_dir, base_name):
+    """rank 0 在所有进程结束后调用：合并 *.shard*.jsonl (+ 旧总表若存在)，按 idx 去重并排序，写为 {base}.jsonl"""
+    shard_files = sorted(glob.glob(os.path.join(output_dir, f'{base_name}.shard*.jsonl')))
+    combined_file = os.path.join(output_dir, f'{base_name}.jsonl')
+
+    # 也将旧 combined 合并，保证断点恢复
+    sources = []
+    if os.path.exists(combined_file):
+        sources.append(combined_file)
+    sources += shard_files
+
+    merged = {}
+    for fp in sources:
+        with open(fp, 'r', encoding='utf-8') as f:
+            for line in f:
+                s = line.strip()
+                if not s:
+                    continue
+                try:
+                    obj = json.loads(s)
+                except Exception:
+                    continue
+                idx = obj.get("idx", None)
+                if isinstance(idx, int) and idx not in merged:
+                    merged[idx] = obj
+
+    # 按 idx 排序输出
+    final = [merged[k] for k in sorted(merged.keys())]
+    write_jsonl(final, combined_file)
+    return combined_file, len(final)
+
+
 # ------------------------
 # Worker
 # ------------------------
-def worker(rank, world_size, args):
-    # torchrun 下：rank=global_rank；LOCAL_RANK=本机卡号
-    # 用 LOCAL_RANK 设设备，用 global rank 做切分与命名
-    local_rank = int(os.environ.get("LOCAL_RANK", 0))
-    if torch.npu.is_available():
-        torch.npu.set_device(local_rank)
-        device = torch.device(f"npu:{local_rank}")
-    else:
-        device = torch.device("cpu")
 
-    dataset_path = os.path.join(args.dataset_dir, args.dataset, 'test.jsonl')
+def worker(args, rank, world_size, device):
+    # 读取数据
+    dataset_file = 'train.jsonl' if args.dataset == 'Math_Math' else 'test.jsonl'
+    dataset_path = os.path.join(args.dataset_dir, args.dataset, dataset_file)
     questions = read_jsonl(dataset_path)
+    if args.dataset == 'Math_Math':
+        questions = questions[:500]
+    N = len(questions)  # TODO
 
     model_basename = os.path.basename(os.path.normpath(args.model_name_or_path))
     output_dir = os.path.join(args.output_path, model_basename, args.dataset)
     os.makedirs(output_dir, exist_ok=True)
     base_name = f'origin_temp{args.temperature}_maxlen{args.max_generated_tokens}'
-    
-    # 用 global_rank 命名，避免多机冲突
     shard_file = os.path.join(output_dir, f'{base_name}.shard{rank:03d}.jsonl')
 
-    existing_idx, existing_q, num_lines = load_existing_indices(shard_file)
-    existing_map = _read_jsonl_map_by_idx(shard_file)
+    # 扫描现有结果（总表 + 全部 shard），用于跳过/救援
+    existing_idx_global, existing_q_global, existing_map_by_idx, existing_map_by_q, total_lines = \
+        scan_existing_outputs(output_dir, base_name)
 
+    # 模型
     model, tokenizer = load_model_and_tokenizer_single_npu(args, device)
 
-    # 全局切分：确保不同机器/卡互不重叠
-    my_indices = [i for i in range(len(questions)) if (i % world_size) == rank]
+    vocab = tokenizer.get_vocab()
+    split_ids = torch.LongTensor([vocab[token] for token in vocab.keys() if "\n\n" in token]).to(device)
+    think_start_id = tokenizer.encode("[unused16]", add_special_tokens=False)[0]  # int
+    think_end_id =  tokenizer.encode("[unused17]", add_special_tokens=False)[0]
 
-    print(f"[rank {rank}] world_size={world_size}")
+    # 使用 DistributedSampler 自动划分索引（不再手写取模）
+    sampler = DistributedSampler(  # rank=i => indices[i:total_size:world_size]
+        list(range(N)), num_replicas=world_size, rank=rank,
+        shuffle=False, drop_last=False
+    )
+
+    # 取 sampler 的分配结果并去除 padding/重复
+    raw_idx = list(iter(sampler))
+    seen = set()
+    my_indices = []
+    for i in raw_idx:
+        if i < N and i not in seen:
+            seen.add(i)
+            my_indices.append(i)
+
+    if rank == 0:
+        print(f"[rank {rank}] world_size = {world_size}")
+        print(f"[rank {rank}] output_dir = {output_dir}")
+        print(f"[rank {rank}] combined existing lines = {total_lines}")
+
     print(f"[rank {rank}] shard_file = {shard_file}")
-    print(f"[rank {rank}] loaded existing: idx={len(existing_idx)}, question={len(existing_q)}, lines={num_lines}")
     print(f"[rank {rank}] will process {len(my_indices)} items")
 
     pbar = tqdm(total=len(my_indices), desc=f"Rank {rank} DP Inference", position=rank, leave=True)
-
-    sys_prompt = "Please reason step by step, and put your final answer within \\boxed{}."  # unify prompt here
+    sys_prompt = "Please reason step by step, and put your final answer within \\boxed{}."
 
     for i in my_indices:
         q = questions[i]
-        hidden_save_path = os.path.join(output_dir, f"hidden_{i}.pt")
+        q_text = q.get("problem", "")
+        hidden_save_path = os.path.join(output_dir, f"hidden_{i:03}.pt")
 
-        if (i in existing_idx) or (q.get("problem") in existing_q):
+        # 若该样本已在历史结果里出现，且缺 hidden，则尝试救援（从历史响应复原 full_text 再导出 hidden）
+        if (i in existing_idx_global) or (q_text in existing_q_global):
             if not os.path.exists(hidden_save_path):
                 try:
-                    entry = existing_map.get(i)
+                    entry = existing_map_by_idx.get(i) or existing_map_by_q.get(q_text)
                     if entry and entry.get("generated_responses"):
                         response_text = entry["generated_responses"][0] if entry["generated_responses"] else ""
-                        full_text = _reconstruct_full_text(tokenizer, sys_prompt, q.get("problem", ""), response_text)
-                        full_inputs = tokenizer([full_text], return_tensors="pt").to(device)
-                        save_pangu_think_split_tokens_only(
+                        full_text = _reconstruct_full_text(tokenizer, sys_prompt, q_text, response_text)
+                        full_inputs = tokenizer(full_text, return_tensors="pt")
+                        _ = save_pangu_think_split_tokens_only(
                             model, tokenizer, full_inputs.input_ids.to(device), full_text, hidden_save_path,
-                            hs_device=args.hs_device
+                            think_end_id,
+                            split_ids,
+                            hs_device=args.hs_device,
                         )
-                        print(f"[rank {rank}] rescued hidden for idx={i}")
                         del full_inputs
-                        _clear_npu()
+                        print(f"[rank {rank}] rescued hidden for idx={i}")
+                        _clear_device
                 except Exception as e_rescue:
                     print(f"[WARN][rank {rank}] rescue hidden failed at idx={i}: {e_rescue}")
-                    _clear_npu()
+                    _clear_device
             pbar.update(1)
             continue
 
+        # prompt 构造与推理
         messages = [
             {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": q['problem']}
+            {"role": "user", "content": q_text}
         ]
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
+        # ! With `return_tensors="pt"`, `input_ids` are always 2D, brackets or not;
+        # ! without it, they're 1D without brackets, 2D with brackets.
         inputs = tokenizer([prompt], return_tensors="pt").to(device)
 
         try:
@@ -348,11 +543,11 @@ def worker(rank, world_size, args):
                     top_p=args.top_p,
                     max_new_tokens=args.max_generated_tokens,
                     return_dict_in_generate=True,
-                    eos_token_id=45892
+                    eos_token_id=tokenizer.eos_token_id
                 )
         except torch.npu.OutOfMemoryError:
-            _clear_npu()
-            print(f"[OOM][rank {rank}] idx={i} : {q['problem'][:80]}... skipping.")
+            print(f"[OOM][rank {rank}] idx={i} : {q_text[:80]}... skipping.")
+            _clear_device()
             pbar.update(1)
             continue
         except Exception as e:
@@ -362,16 +557,18 @@ def worker(rank, world_size, args):
 
         response_text = tokenizer.decode(
             output.sequences[0][inputs.input_ids.shape[1]:],
-            skip_special_tokens=True  # TODO: whether to skip? If skip, will there still be </think>?
+            skip_special_tokens=True
         )
         full_text = prompt + response_text
 
+        # 逐 token logprob
         gen_token_ids = output.sequences[0][inputs.input_ids.shape[1]:].detach().cpu()
         try:
             gen_logps = compute_token_logprobs_streaming(
                 model, tokenizer,
                 prompt_ids=inputs.input_ids,
                 gen_ids=gen_token_ids,
+                split_ids=split_ids,
                 device=device,
                 score_dtype=args.score_dtype,
             )
@@ -382,12 +579,25 @@ def worker(rank, world_size, args):
             print(f"[WARN][rank {rank}] logprob pass failed at idx={i}: {e}")
             gen_logps = torch.empty(0)
 
-        text_before_think = response_text.split('</think>')[0]  # TODO: once skipped, will there still be </think>
-        text_segments = rsplit(r'\n\n+', text_before_think)
+        # 句级置信度（按 \n\n 切段；与原逻辑保持一致）
+        text_before_think = response_text.split('[unused17]')[0]
+        tokens_before_think = tokenizer.tokenize(text_before_think)
+
+        token_segments, current_segment = [], []
+        for token in tokens_before_think:
+            if "\n\n" in token:
+                if current_segment:
+                    token_segments.append(current_segment)
+                    current_segment = []
+            else:
+                current_segment.append(token)
+        if current_segment:
+            token_segments.append(current_segment)
+
         confidences = []
         start = 0
-        for segment in text_segments:
-            seg_ids = tokenizer([segment], add_special_tokens=False).input_ids
+        for segment in token_segments:
+            seg_ids = tokenizer.convert_tokens_to_ids(segment)
             end = start + len(seg_ids)
             if gen_logps.numel() > 0 and end > start and end <= gen_logps.numel():
                 seg_logps = gen_logps[start:end]
@@ -397,38 +607,43 @@ def worker(rank, world_size, args):
                 confidences.append(0.0)
             start = end
 
+        # 先保存 hidden，再写 JSON 行（并保证 step_hidden_num 一定有值）
+        step_hidden_num = -1
         try:
             if not os.path.exists(hidden_save_path):
-                full_inputs = tokenizer([full_text], return_tensors="pt")
-                save_pangu_think_split_tokens_only(
+                full_inputs = tokenizer(full_text, return_tensors="pt")
+                step_hidden_num = save_pangu_think_split_tokens_only(
                     model, tokenizer, full_inputs.input_ids.to(device), full_text, hidden_save_path,
+                    think_end_id,
+                    split_ids,
                     hs_device=args.hs_device
                 )
                 del full_inputs
             else:
                 print(f"[rank {rank}] hidden exists, skip: {hidden_save_path}")
-        except torch.npu.OutOfMemoryError:
-            print(f"[WARN][rank {rank}] hidden save OOM at idx={i}; will rely on rescue next run.")
-            _clear_npu()
         except Exception as he:
             print(f"[WARN][rank {rank}] hidden save failed at idx={i}: {he} (rescueable next run)")
+            _clear_device()
 
+        # 写本 rank 的 shard 行
         result_entry = {
             "idx": i,
-            "question": q.get("problem", ""),
+            "question": q_text,
             "generated_responses": [response_text],
             "gold_answer": q.get("answer", ""),
             "sentence_confidences": confidences,
+            "confidence_num": len(confidences),
+            "step_hidden_num": step_hidden_num
         }
         with open(shard_file, 'a', encoding='utf-8') as fout:
             fout.write(json.dumps(result_entry, ensure_ascii=False) + '\n')
 
         del output, inputs, gen_token_ids, gen_logps
-        _clear_npu()
+        _clear_device()
         pbar.update(1)
 
     pbar.close()
-    print(f"[rank {rank}] ✅ Done. Results saved to {shard_file}")
+    print(f"[rank {rank}] ✅ Done. Shard saved to {shard_file}")
 
 
 # ------------------------
@@ -445,20 +660,27 @@ def main():
     parser.add_argument('--top_p', type=float, default=0.95)
     parser.add_argument('--max_generated_tokens', type=int, default=512)
     parser.add_argument('--trust_remote_code', action='store_true')
-    parser.add_argument('--num_npus', type=int, default=1)
     parser.add_argument('--hs_device', type=str, default='auto', choices=['auto', 'npu', 'cpu'])
     parser.add_argument('--score_dtype', type=str, default='bf16', choices=['bf16', 'fp16', 'fp32'])
     args = parser.parse_args()
 
-    backend = "hccl" if torch.npu.is_available() else ("nccl" if torch.cuda.is_available() else "gloo")
-    dist.init_process_group(backend=backend, init_method="env://")
+    is_dist, rank, world_size, local_rank, device = init_distributed_if_needed()
 
-    global_rank = dist.get_rank()
-    world_size = dist.get_world_size()
+    # 每个进程各自跑 worker
+    worker(args, rank, world_size, device)
 
-    try:
-        worker(global_rank, world_size, args)
-    finally:
+    # 所有进程同步；rank 0 合并汇总
+    if is_dist:
+        dist.barrier()
+
+    if rank == 0:
+        model_basename = os.path.basename(os.path.normpath(args.model_name_or_path))
+        output_dir = os.path.join(args.output_path, model_basename, args.dataset)
+        base_name = f'origin_temp{args.temperature}_maxlen{args.max_generated_tokens}'
+        combined_file, count = merge_all_shards(output_dir, base_name)
+        print(f"[rank 0] ✅ Merged {count} entries to: {combined_file}")
+
+    if is_dist and dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()
 
