@@ -40,6 +40,13 @@ except Exception:
 # ------------------------
 # Utils
 # ------------------------
+def parse_optional_float(value):
+    """Parse None or float from command line."""
+    if value is None:
+        return None
+    if isinstance(value, str) and value.lower() == 'none':
+        return None
+    return float(value)
 
 def read_jsonl(file_path):
     with open(file_path, 'r', encoding='utf-8') as f:
@@ -85,8 +92,31 @@ def build_output_paths(args):
     model_basename = os.path.basename(os.path.normpath(args.model_name_or_path))
     output_dir = os.path.join(args.output_path, model_basename, args.dataset)
     os.makedirs(output_dir, exist_ok=True)
-    run_prefix = (args.run_id.strip() + "_") if args.run_id else ""
-    base_name = f"{run_prefix}steer_temp{args.temperature}_maxlen{args.max_generated_tokens}"
+
+    # Base components
+    components = []
+    
+    # Optional run_id prefix
+    if args.run_id:
+        components.append(args.run_id.strip())
+    
+    components.append("steer")
+    
+    # Always include max_generated_tokens
+    components.append(f"maxlen{args.max_generated_tokens}")
+    
+    # Always include seed
+    components.append(f"seed{args.seed}")
+    
+    # Optional low_val_2
+    if args.low_val_2 is not None:
+        components.append(f"low2_{args.low_val_2}")
+    
+    # Optional high_val_2
+    if args.high_val_2 is not None:
+        components.append(f"high2_{args.high_val_2}")
+    
+    base_name = "_".join(components)
     return output_dir, base_name
 
 def scan_existing_outputs(output_dir, base_name):
@@ -332,7 +362,9 @@ def worker(args, rank, world_size, local_rank, device):
         steering_layer=args.steer_layer,
         steer_vec=steer_vector,
         steer_coef=args.steer_coef,
-        tokenizer=tokenizer
+        tokenizer=tokenizer,
+        low_val_2=args.low_val_2,
+        high_val_2=args.high_val_2
     )
 
     # 自动划分样本（不再手写 i % world_size）
@@ -439,9 +471,11 @@ def main():
     parser.add_argument('--steer_coef', type=float, default=1.0)
     parser.add_argument('--temperature', type=float, default=0.7)
     parser.add_argument('--top_p', type=float, default=0.95)
-    parser.add_argument('--max_generated_tokens', type=int, default=16000)
     parser.add_argument('--run_id', type=str, default="", help="Optional tag to separate different runs in filenames")
+    parser.add_argument('--max_generated_tokens', type=int, default=16000)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--low_val_2', type=parse_optional_float, default=None)
+    parser.add_argument('--high_val_2', type=parse_optional_float, default=None)
     args = parser.parse_args()
     set_seed(args.seed)
 

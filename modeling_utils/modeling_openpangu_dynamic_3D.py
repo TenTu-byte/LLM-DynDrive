@@ -591,12 +591,7 @@ class PanguEmbeddedForCausalLM(PanguEmbeddedPreTrainedModel, GenerationMixin):
         self.steering_layer = None
         self.steering_coef = 0.0
         self.steering_think_flag=None
-        # self._coefs = None
-        # self._step_prob_sum = None
-        # self._step_tok_count = None
-        # self._last_maxprob = None
         self._prev_step_mean = None  # for two-step variance
-
 
         self.steering_split_ids = None
         self.steering_think_start_id=None
@@ -608,13 +603,23 @@ class PanguEmbeddedForCausalLM(PanguEmbeddedPreTrainedModel, GenerationMixin):
         self._step_prob_sum = None      # sum of max-prob within a segment
         self._step_tok_count = None     # token count within a segment
         self._last_maxprob = None       # max-prob of the last token from previous step
+
+        # --- dynamic steering parameters (可以在外部设置)
+        self.q25c = None
+        self.q75c = None
+        self.low_val_1 = None
+        self.high_val_1 = None
+        self.q25v = None
+        self.q75v = None
+        self.low_val_2 = None
+        self.high_val_2 = None
         # ! ------ steering ------
 
         # Initialize weights and apply final processing
         self.post_init()
     
     # ! ------ steering ------
-    def set_steering_flag(self, steering_flag, steering_layer=None, steer_vec=None,  steer_coef=0.0, tokenizer=None):
+    def set_steering_flag(self, steering_flag, steering_layer=None, steer_vec=None, steer_coef=0.0, tokenizer=None, low_val_2=None, high_val_2=None):
         self.steering_flag = steering_flag
         self.steering_vector = steer_vec
         self.steering_layer = steering_layer
@@ -636,6 +641,8 @@ class PanguEmbeddedForCausalLM(PanguEmbeddedPreTrainedModel, GenerationMixin):
         self._step_prob_sum = None
         self._step_tok_count = None
         self._last_maxprob = None
+        self.low_val_2 = low_val_2
+        self.high_val_2 = high_val_2
 
     
     def start_new_round(self):
@@ -792,17 +799,16 @@ class PanguEmbeddedForCausalLM(PanguEmbeddedPreTrainedModel, GenerationMixin):
                     return F1
 
                 # —— 手动输入：置信分位 + 目标（保持你原来的风格，只是多了 var 的量）——
-                q25c = 0.75   # confidence q25,1.5b:0.67
-                q75c = 0.93   # confidence q75,1.5b:0.94
-                # TODO: how to select values here?
-                low_val_1 = -1.14  # F(q25c),1.5b:-1.5
-                high_val_1 = 0.01   # F(1)
+                q25c = self.q25c if self.q25c is not None else 0.74   # confidence q25, v0:0.75
+                q75c = self.q75c if self.q75c is not None else 0.92   # confidence q75, v0:0.93
+                low_val_1 = self.low_val_1 if self.low_val_1 is not None else -0.99  # F(q25c), v0:-1.14
+                high_val_1 = self.high_val_1 if self.high_val_1 is not None else 0.01   # F(1)
 
                 # —— 新增：方差分位 + 两个目标 —— 
-                q25v = 0.000289
-                q75v = 0.005617
-                low_val_2  = -5.54  # f(q25c, q75v)  低c+高v更低（下界）1.5b:-4
-                high_val_2 =  0.1   # f(1, q25v)    高c+低v更高（上界）
+                q25v = self.q25v if self.q25v is not None else 0.000263  # v0: 0.000289
+                q75v = self.q75v if self.q75v is not None else 0.006008  # v0: 0.005617
+                low_val_2 = self.low_val_2 if self.low_val_2 is not None else -3.97  # f(q25c, q75v)  低c+高v更低（下界）v0:-5.54
+                high_val_2 = self.high_val_2 if self.high_val_2 is not None else 0.1   # f(1, q25v)    高c+低v更高（上界）
 
                 # 防呆：分位数排序，避免写反造成 IQR 负值
                 q25c, q75c = (min(q25c, q75c), max(q25c, q75c))
