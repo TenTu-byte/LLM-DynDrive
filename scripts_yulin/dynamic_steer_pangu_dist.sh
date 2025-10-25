@@ -58,7 +58,7 @@ for ds in "${datasets[@]}"; do
         --dataset_dir "./Data/" \
         --dataset "$ds" \
         --output_path "$outputs/outputs_steer_dynamic" \
-        --steer_vector_path "$outputs/openPangu-Embedded-7B-V1.1/Math_Math/steer_vector_layer27_conf_mixed.pt" \
+        --steer_vector_path "$outputs/openPangu-Embedded-7B-V1.1/Math_Math/steer_vector_layer${STEER_LAYER}_conf_mixed.pt" \
         --steer_layer $STEER_LAYER \
         --steer_coef -1 \
         --run_id $RUN_ID \
