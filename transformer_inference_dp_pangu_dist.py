@@ -406,7 +406,7 @@ def _reconstruct_full_text(tokenizer, sys_prompt, question_text, response_text):
     return prompt + (response_text or "")
 
 
-def merge_all_shards(output_dir, base_name):
+def merge_all_shards(output_dir, base_name, remove_shards=True):
     """rank 0 在所有进程结束后调用：合并 *.shard*.jsonl (+ 旧总表若存在)，按 idx 去重并排序，写为 {base}.jsonl"""
     shard_files = sorted(glob.glob(os.path.join(output_dir, f'{base_name}.shard*.jsonl')))
     combined_file = os.path.join(output_dir, f'{base_name}.jsonl')
@@ -435,6 +435,16 @@ def merge_all_shards(output_dir, base_name):
     # 按 idx 排序输出
     final = [merged[k] for k in sorted(merged.keys())]
     write_jsonl(final, combined_file)
+
+    # 删除shard文件
+    if remove_shards and shard_files:
+        for shard_file in shard_files:
+            try:
+                os.remove(shard_file)
+                print(f"[rank 0] 🗑️  Removed shard: {shard_file}")
+            except Exception as e:
+                print(f"[WARN][rank 0] Failed to remove {shard_file}: {e}")
+
     return combined_file, len(final)
 
 
@@ -677,7 +687,7 @@ def main():
         model_basename = os.path.basename(os.path.normpath(args.model_name_or_path))
         output_dir = os.path.join(args.output_path, model_basename, args.dataset)
         base_name = f'origin_temp{args.temperature}_maxlen{args.max_generated_tokens}'
-        combined_file, count = merge_all_shards(output_dir, base_name)
+        combined_file, count = merge_all_shards(output_dir, base_name, remove_shards=True)
         print(f"[rank 0] ✅ Merged {count} entries to: {combined_file}")
 
     if is_dist and dist.is_initialized():
