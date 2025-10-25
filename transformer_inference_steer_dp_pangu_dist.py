@@ -457,9 +457,172 @@ def worker(args, rank, world_size, local_rank, device):
     print(f"[rank {rank}] ✅ Done. Shard saved to {shard_file}")
 
 # ------------------------
+# Evaluation
+# ------------------------
+def evaluate_and_save(args, combined_file):
+    from utils.data_loader import load_data
+    from utils.parser import parse_ground_truth, extract_answer
+    from utils.grader import check_is_correct
+    from math import comb
+
+    # --------- helpers ---------
+    def _extract_first_text(gen):
+        """尽量兼容多种结构，取首个文本用于长度统计；评测正确性仍看所有候选。"""
+        if isinstance(gen, str):
+            return gen
+        if isinstance(gen, dict):
+            for key in ("text", "content", "generated_response", "generated_text", "output", "message", "response"):
+                v = gen.get(key)
+                if isinstance(v, str):
+                    return v
+        if isinstance(gen, list) and gen:
+            for item in gen:
+                t = _extract_first_text(item)
+                if t:
+                    return t
+        return ""
+
+    def _extract_all_texts(gens):
+        out = []
+        for g in gens:
+            if isinstance(g, str):
+                out.append(g)
+            elif isinstance(g, dict):
+                for key in ("text", "content", "generated_response", "generated_text", "output", "message", "response"):
+                    v = g.get(key)
+                    if isinstance(v, str):
+                        out.append(v); break
+            elif isinstance(g, list) and g:
+                # 取子项中的首个字符串
+                t = _extract_first_text(g)
+                if t:
+                    out.append(t)
+        return out
+    
+    # --------- load ---------
+    outputs = read_jsonl(combined_file)
+    outputs_by_idx = {o.get("idx", i): o for i, o in enumerate(outputs)}
+    examples = load_data(args.dataset, args.split, args.dataset_dir)
+
+    # --------- correctness & pass@k ---------
+    total = len(examples)
+    correct_cnt = 0
+    pass_at_k_vals = []
+    wrong_ids = []
+    for i in tqdm(range(total), desc="Evaluating", leave=False):
+        d = examples[i]
+        gt_cot, gt_ans = parse_ground_truth(d, args.dataset)
+        out = outputs_by_idx.get(i)
+        if not out:
+            wrong_ids.append(d.get("id", i))
+            continue
+        texts = _extract_all_texts(out.get("generated_responses", []))
+        if not texts:
+            wrong_ids.append(d.get("id", i))
+            continue
+        gen_answers = [extract_answer(t, args.dataset) for t in texts]
+        is_correct_list = [check_is_correct(a, gt_ans) for a in gen_answers]
+        if any(is_correct_list):
+            correct_cnt += 1
+        else:
+            wrong_ids.append(d.get("id", i))
+        if len(is_correct_list) > 1:
+            c = sum(is_correct_list)
+            n = len(is_correct_list)
+            if c > 0:
+                if n - c < args.k:
+                    val = 1.0
+                else:
+                    val = 1.0 - (comb(n - c, args.k) / comb(n, args.k))
+                pass_at_k_vals.append(val)
+            else:
+                pass_at_k_vals.append(0.0)
+
+    acc = correct_cnt / total if total else 0.0
+    metrics = {
+        "dataset": args.dataset,
+        "split": args.split,
+        "total": total,
+        "correct": correct_cnt,
+        "accuracy": acc,
+        "k": args.k
+    }
+    if pass_at_k_vals:
+        metrics[f"pass@{args.k}"] = sum(pass_at_k_vals) / len(pass_at_k_vals)
+    else:
+        metrics[f"pass@{args.k}"] = acc  # 单样本时退化为 Acc
+    
+    # --------- token length stats (按原始逻辑) ---------
+    # 统计基于 outputs（与原脚本一致）
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path,
+        use_fast=False,
+        trust_remote_code=True,
+        local_files_only=True
+    )
+
+    test_num = len(outputs)
+    resp_word_counts = []
+    full_token_counts = []
+    think_token_counts = []
+    think_found = 0
+    fallback_full = 0
+
+    for data in outputs:
+        gens = data.get("generated_responses", [])
+        text = _extract_first_text(gens) if gens else ""
+        # 1) 词数
+        resp_word_counts.append(len(text.split()) if text else 0)
+        # 2) 全文 token 数（与原始逻辑一致：不加 special tokens）
+        if text:
+            full_tokens_len = len(tokenizer(text, add_special_tokens=False)["input_ids"])
+        else:
+            full_tokens_len = 0
+        full_token_counts.append(full_tokens_len)
+        # 3) think 段 token 数：以 [unused17] 截断，找不到则用全文
+        lower = text.lower() if text else ""
+        idx = lower.find("[unused17]")  # Pangu 的思维段落边界
+        if idx != -1:
+            think_text = text[:idx]
+            think_found += 1
+        else:
+            think_text = text
+            if text:
+                fallback_full += 1
+        if think_text:
+            think_tokens_len = len(tokenizer(think_text, add_special_tokens=False)["input_ids"])
+        else:
+            think_tokens_len = 0
+        think_token_counts.append(think_tokens_len)
+
+    avg_resp_words = (sum(resp_word_counts) / test_num) if test_num else 0.0
+    avg_full_tokens = (sum(full_token_counts) / test_num) if test_num else 0.0
+    avg_think_tokens = (sum(think_token_counts) / test_num) if test_num else 0.0
+
+    metrics["token_stats"] = {
+        "samples": test_num,
+        "avg_word_count": avg_resp_words,
+        "avg_full_token_count": avg_full_tokens,
+        "avg_think_token_count": avg_think_tokens,
+        "think_found": think_found,
+        "think_fallback_full": fallback_full
+    }
+
+    # --------- save ---------
+    output_dir, base_name = build_output_paths(args)
+    metrics_path = os.path.join(output_dir, f"{base_name}.metrics.json")
+    wrong_ids_path = os.path.join(output_dir, f"{base_name}.wrong_ids.json")
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, ensure_ascii=False, indent=2)
+    with open(wrong_ids_path, "w", encoding="utf-8") as f:
+        json.dump({"count": len(wrong_ids), "ids": wrong_ids}, f, ensure_ascii=False, indent=2)
+    print(f"[rank 0] ✅ Metrics saved to: {metrics_path}")
+    print(f"[rank 0] ✅ Wrong IDs saved to: {wrong_ids_path} (count={len(wrong_ids)})")
+    return metrics_path, wrong_ids_path
+
+# ------------------------
 # Main
 # ------------------------
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--model_name_or_path', type=str, required=True)
@@ -476,6 +639,7 @@ def main():
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--low_val_2', type=parse_optional_float, default=None)
     parser.add_argument('--high_val_2', type=parse_optional_float, default=None)
+    parser.add_argument("--k", type=int, default=1, help="Value of k for pass@k calculation")
     args = parser.parse_args()
     set_seed(args.seed)
 
@@ -490,6 +654,7 @@ def main():
         output_dir, base_name = build_output_paths(args)
         combined_file, count = merge_all_shards(output_dir, base_name, remove_shards=True)
         print(f"[rank 0] ✅ Merged {count} entries to: {combined_file}")
+        evaluate_and_save(args, combined_file)
     if is_dist and dist.is_initialized():
         dist.barrier()
         dist.destroy_process_group()

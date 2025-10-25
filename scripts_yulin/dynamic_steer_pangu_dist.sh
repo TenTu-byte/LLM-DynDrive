@@ -65,7 +65,7 @@ for ds in "${datasets[@]}"; do
         --max_generated_tokens $MAX_TOKENS \
         --seed $SEED \
         --low_val_2 $LOW_VAL_2 \
-        --high_val_2 $HIGH_VAL_2 \
+        --high_val_2 $HIGH_VAL_2
     echo "=== Finished ${ds} ==="
 done
 
