@@ -54,7 +54,7 @@ def compute_global_diff_stats(jsonl_path: str, expected_offset: int = 1) -> Tupl
 
 
 if __name__ == "__main__":
-    jsonl_path = "/home/ma-user/work/dataset/outputs_yulin/openPangu-Embedded-7B-V1.1/Math_Math/origin_temp0.7_maxlen16000.merged.jsonl"
+    jsonl_path = "/home/ma-user/work/dataset/outputs_yulin_gy/openPangu-Embedded-7B-V1.1/Math_Math/origin_temp0.7_maxlen16000.jsonl"
     expected_offset = 1
     q25, mean, q75, compute_num = compute_global_diff_stats(jsonl_path, expected_offset)
     print("q25: ", q25)

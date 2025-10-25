@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -ex
 
 # npu-smi info
 # pip list
@@ -10,8 +10,8 @@ cd ${PROJECT_DIR}
 
 
 python layer_analysis.py \
-  --jsonl_path $DATASET_DIR/outputs_yulin/openPangu-Embedded-7B-V1.1/Math_Math/origin_temp0.7_maxlen16000.merged.jsonl \
-  --hidden_dir $DATASET_DIR/outputs_yulin/openPangu-Embedded-7B-V1.1/Math_Math/ \
+  --jsonl_path $DATASET_DIR/outputs_yulin_gy/openPangu-Embedded-7B-V1.1/Math_Math/origin_temp0.7_maxlen16000.jsonl \
+  --hidden_dir $DATASET_DIR/outputs_yulin_gy/openPangu-Embedded-7B-V1.1/Math_Math/ \
   --layers 1-34 \
   --max_files 500 \
   --expected_offset 1 \

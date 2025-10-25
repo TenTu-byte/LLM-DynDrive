@@ -10,6 +10,9 @@ pip install word2number==1.1
 
 source /usr/local/Ascend/ascend-toolkit/set_env.sh
 export ASCEND_HOME_PATH="/usr/local/Ascend/ascend-toolkit/latest"
+export HCCL_CONNECT_TIMEOUT=7200 # 2h
+export HCCL_EXEC_TIMEOUT=7200    # 2h
+export HCCL_IF_BASE_PORT=64000
 
 # Change working directory
 PROJECT_DIR=$(dirname "$(dirname "$(realpath "$0")")")
@@ -29,13 +32,6 @@ if [[ -z "$MASTER_ADDR" ]]; then
   MASTER_ADDR="${MA_VJ_NAME}-${MA_TASK_NAME}-0.${MA_VJ_NAME}"
   MASTER_ADDR=$(ping "$MASTER_ADDR" -c 1 | sed '1{s/[^(]*(//;s/).*//;q}')
 fi
-
-# export HCCL_SOCKET_IFNAME=eno0
-# export HCCL_SOCKET_IFNAME=enp189s0f0
-# export HCCL_IF_IP=$MA_CURRENT_HOST_IP
-export HCCL_CONNECT_TIMEOUT=7200 # 2h
-export HCCL_EXEC_TIMEOUT=7200    # 2h
-export HCCL_IF_BASE_PORT=64000
 
 printenv
 
