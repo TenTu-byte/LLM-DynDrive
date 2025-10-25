@@ -15,11 +15,29 @@ export ASCEND_HOME_PATH="/usr/local/Ascend/ascend-toolkit/latest"
 PROJECT_DIR=$(dirname "$(dirname "$(realpath "$0")")")
 cd ${PROJECT_DIR}
 
+# set npu plog env
+ma_vj_name=`echo ${MA_VJ_NAME} | sed 's:ma-job:modelarts-job:g'`
+task_name="worker-${VC_TASK_INDEX}"
+task_plog_path=${MA_LOG_DIR}/${ma_vj_name}/${task_name}
+mkdir -p ${task_plog_path}
+# export ASCEND_PROCESS_LOG_PATH=${task_plog_path}
+export ASCEND_PROCESS_LOG_PATH=${ASCEND_PROCESS_LOG_PATH}/${VC_TASK_INDEX}
+echo "plog path: ${ASCEND_PROCESS_LOG_PATH}"
+
 # Resolve master IP
 if [[ -z "$MASTER_ADDR" ]]; then
   MASTER_ADDR="${MA_VJ_NAME}-${MA_TASK_NAME}-0.${MA_VJ_NAME}"
   MASTER_ADDR=$(ping "$MASTER_ADDR" -c 1 | sed '1{s/[^(]*(//;s/).*//;q}')
 fi
+
+# export HCCL_SOCKET_IFNAME=eno0
+# export HCCL_SOCKET_IFNAME=enp189s0f0
+# export HCCL_IF_IP=$MA_CURRENT_HOST_IP
+export HCCL_CONNECT_TIMEOUT=7200 # 2h
+export HCCL_EXEC_TIMEOUT=7200    # 2h
+export HCCL_IF_BASE_PORT=64000
+
+printenv
 
 # Multi-node inference
 torchrun \
