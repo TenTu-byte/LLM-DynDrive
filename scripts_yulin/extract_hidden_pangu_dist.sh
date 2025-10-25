@@ -1,4 +1,5 @@
-set -euo pipefail
+#!/usr/bin/env bash
+set -ex
 npu-smi info
 
 # Setup environment
