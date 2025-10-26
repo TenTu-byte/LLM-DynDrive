@@ -58,28 +58,28 @@ for ds in "${datasets[@]}"; do
         --dataset_dir "./Data/" \
         --dataset "$ds" \
         --output_path "$outputs/outputs_steer_dynamic" \
-        --steer_vector_path "$outputs/openPangu-Embedded-7B-V1.1/Math_Math/steer_vector_layer${STEER_LAYER}_conf_mixed.pt" \
-        --steer_layer $STEER_LAYER \
+        --steer_vector_path "$outputs/openPangu-Embedded-7B-V1.1/Math_Math/steer_vector_layer${steer_layer}_conf_mixed.pt" \
+        --steer_layer $steer_layer \
         --steer_coef -1 \
-        --run_id $RUN_ID \
-        --max_generated_tokens $MAX_TOKENS \
-        --seed $SEED \
-        --low_val_2 $LOW_VAL_2 \
-        --high_val_2 $HIGH_VAL_2
+        --run_id $run_id \
+        --max_generated_tokens $max_tokens \
+        --seed $seed \
+        --low_val_2 $low_val_2 \
+        --high_val_2 $high_val_2
     echo "=== Finished ${ds} ==="
 done
 
 # Default values
 # v0:
-# STEER_LAYER=27
-# RUN_ID=v0
-# LOW_VAL_2=None
-# HIGH_VAL_2=None
+# steer_layer=27
+# run_id=v0
+# low_val_2=None
+# high_val_2=None
 # v1:
-# STEER_LAYER=33
-# RUN_ID=v1
-# LOW_VAL_2=None
-# HIGH_VAL_2=None
+# steer_layer=33
+# run_id=v1
+# low_val_2=None
+# high_val_2=None
 # all:
-# MAX_TOKENS=16000
-# SEED=42
+# max_tokensS=16000
+# seed=42
