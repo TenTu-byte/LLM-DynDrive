@@ -642,18 +642,19 @@ def main():
     parser.add_argument("--k", type=int, default=1, help="Value of k for pass@k calculation")
     parser.add_argument("--split", type=str, default="test")
     args = parser.parse_args()
-
-    # 打印接收到的参数
-    print("=" * 80)
-    print("Received Arguments:")
-    print("=" * 80)
-    for arg, value in vars(args).items():
-        print(f"  {arg:25s} = {value}")
-    print("=" * 80)
     
     set_seed(args.seed)
 
     is_dist, rank, world_size, local_rank, device = init_distributed_if_needed()
+
+    # 打印接收到的参数
+    if rank == 0:
+        print("=" * 80)
+        print("Received Arguments:")
+        print("=" * 80)
+        for arg, value in vars(args).items():
+            print(f"  {arg} = {value}")
+        print("=" * 80)
 
     worker(args, rank, world_size, local_rank, device)
 
