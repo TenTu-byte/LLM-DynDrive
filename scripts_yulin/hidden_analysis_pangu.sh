@@ -8,8 +8,8 @@ set -euo pipefail
 PROJECT_DIR=$(dirname "$(dirname "$(realpath "$0")")")
 cd ${PROJECT_DIR}
 
-LAYER_ID=33  # v0: 27
-THRESHOLD=0.74  # v0: 0.75
+LAYER_ID=27  # v0: 27; v1:33; v2:27
+THRESHOLD=0.74  # v0: 0.75; v1: 0.74; v2: 
 
 python hidden_analysis_mixed_auto_pangu.py \
   --layer_id $LAYER_ID \

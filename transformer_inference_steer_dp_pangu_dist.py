@@ -363,6 +363,12 @@ def worker(args, rank, world_size, local_rank, device):
         steer_vec=steer_vector,
         steer_coef=args.steer_coef,
         tokenizer=tokenizer,
+        q25c=args.q25c,
+        q75c=args.q75c,
+        low_val_1=args.low_val_1,
+        high_val_1=args.high_val_1,
+        q25v=args.q25v,
+        q75v=args.q75v,
         low_val_2=args.low_val_2,
         high_val_2=args.high_val_2
     )
@@ -644,8 +650,14 @@ def main():
     parser.add_argument('--run_id', type=str, default="", help="Optional tag to separate different runs in filenames")
     parser.add_argument('--max_generated_tokens', type=int, default=16000)
     parser.add_argument('--seed', type=int, default=42)
-    parser.add_argument('--low_val_2', type=parse_optional_float, default=None)
-    parser.add_argument('--high_val_2', type=parse_optional_float, default=None)
+    parser.add_argument('--q25c', type=float, default=None)
+    parser.add_argument('--q75c', type=float, default=None)
+    parser.add_argument('--low_val_1', type=float, default=None)
+    parser.add_argument('--high_val_1', type=float, default=None)
+    parser.add_argument('--q25v', type=float, default=None)
+    parser.add_argument('--q75c', type=float, default=None)
+    parser.add_argument('--low_val_2', type=float, default=None)
+    parser.add_argument('--high_val_2', type=float, default=None)
     parser.add_argument("--k", type=int, default=1, help="Value of k for pass@k calculation")
     parser.add_argument("--split", type=str, default="test")
     args = parser.parse_args()

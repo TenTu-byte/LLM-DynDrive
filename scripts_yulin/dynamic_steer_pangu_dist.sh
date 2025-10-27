@@ -64,6 +64,12 @@ for ds in "${datasets[@]}"; do
         --run_id $run_id \
         --max_generated_tokens $max_tokens \
         --seed $seed \
+        --q25c $q25c \
+        --q75c $q75c \
+        --low_val_1 $low_val_1 \
+        --high_val_1 $high_val_1 \
+        --q25v $q25v \
+        --q75v $q75v \
         --low_val_2 $low_val_2 \
         --high_val_2 $high_val_2
     echo "=== Finished ${ds} ==="
