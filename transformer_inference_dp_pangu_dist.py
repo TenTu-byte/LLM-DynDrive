@@ -601,10 +601,10 @@ def worker(args, rank, world_size, device):
         
         # 在 think_end 之前，根据 split_ids 划分段落
         step_positions = []
-        for i in range(think_end_pos - 1):
+        for j in range(think_end_pos - 1):
             # 当前 token 是分隔符，且下一个 token 不是分隔符时，标记为段落起始
-            if gen_token_ids_list[i] in split_ids_set and gen_token_ids_list[i + 1] not in split_ids_set:
-                step_positions.append(i + 1)
+            if gen_token_ids_list[j] in split_ids_set and gen_token_ids_list[j + 1] not in split_ids_set:
+                step_positions.append(j + 1)
 
         # 计算每个段落的置信度
         confidences = []
