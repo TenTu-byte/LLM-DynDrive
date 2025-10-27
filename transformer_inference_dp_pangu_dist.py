@@ -520,7 +520,8 @@ def worker(args, rank, world_size, device):
                         full_text = _reconstruct_full_text(tokenizer, sys_prompt, q_text, response_text)
                         full_inputs = tokenizer(full_text, return_tensors="pt")
                         _ = save_pangu_think_split_tokens_only(
-                            model, tokenizer, full_inputs.input_ids.to(device), full_text, hidden_save_path,
+                            model, tokenizer, full_inputs.input_ids.to(device),
+                            hidden_save_path,
                             think_end_id,
                             split_ids,
                             hs_device=args.hs_device,
