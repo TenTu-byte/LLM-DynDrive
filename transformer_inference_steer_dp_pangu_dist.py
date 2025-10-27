@@ -543,6 +543,7 @@ def evaluate_and_save(args, combined_file):
         "dataset": args.dataset,
         "split": args.split,
         "total": total,
+        "generated": len(outputs),
         "correct": correct_cnt,
         "accuracy": acc,
         "k": args.k
@@ -551,6 +552,12 @@ def evaluate_and_save(args, combined_file):
         metrics[f"pass@{args.k}"] = sum(pass_at_k_vals) / len(pass_at_k_vals)
     else:
         metrics[f"pass@{args.k}"] = acc  # 单样本时退化为 Acc
+
+    # 添加完整性检查信息
+    is_complete = len(outputs) == total
+    metrics["is_complete"] = is_complete
+    if not is_complete:
+        metrics["missing_count"] = total - len(outputs)
     
     # --------- token length stats (按原始逻辑) ---------
     # 统计基于 outputs（与原脚本一致）
