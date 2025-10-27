@@ -167,43 +167,44 @@ def _summarize_selected_logprobs(selected_logprobs: torch.Tensor, policy: str = 
     return torch.exp(selected_logprobs.mean()).item()
 
 
-def compute_token_logprobs_streaming(model, tokenizer, prompt_ids: torch.Tensor, gen_ids: torch.Tensor, split_ids: torch.Tensor, device: torch.device, score_dtype: str = 'bf16') -> torch.Tensor:
+def compute_token_logprobs_streaming(model, prompt_ids: torch.Tensor, gen_ids: torch.Tensor, think_end_id: int, device: torch.device) -> torch.Tensor:
     assert prompt_ids.ndim == 2 and prompt_ids.size(0) == 1
     assert gen_ids.ndim == 1
 
-    dtype_map = {'bf16': torch.bfloat16, 'fp16': torch.float16, 'fp32': torch.float32}
-    amp_dtype = dtype_map.get(score_dtype, torch.bfloat16)
+    # 找到 think_end 的位置
+    gen_ids_list = gen_ids.tolist()
+    try:
+        think_end_pos = gen_ids_list.index(think_end_id)
+    except ValueError:
+        # 如果没找到 think_end_id，处理整个序列
+        think_end_pos = len(gen_ids_list)
+    
+    # 只处理到 think_end 位置的 token
+    thinking_gen_ids = gen_ids[:think_end_pos]
+    
+    if thinking_gen_ids.numel() == 0:
+        return torch.empty(0, dtype=torch.float32)
 
     logps = []
-    split_ids_set = set(split_ids.tolist())
 
-    if device.type == 'npu' and hasattr(torch, "npu"):
-        autocast_ctx = torch.npu.amp.autocast(enabled=True, dtype=amp_dtype)
-    elif device.type == 'cuda':
-        autocast_ctx = torch.cuda.amp.autocast(enabled=True, dtype=amp_dtype)
-    else:
-        autocast_ctx = nullcontext()
-
-    with torch.inference_mode(), autocast_ctx:
+    with torch.inference_mode():#, autocast_ctx:
         # 首 token
         out = model(prompt_ids.to(device), use_cache=True, return_dict=True)
         past = out.past_key_values
         logits = out.logits[:, -1, :]
-        if gen_ids[0].item() not in split_ids_set:
-            logprob0 = F.log_softmax(logits, dim=-1)[0, gen_ids[0].to(device)].item()
-            logps.append(logprob0)
+        logprob0 = F.log_softmax(logits, dim=-1)[0, gen_ids[0].to(device)].item()
+        logps.append(logprob0)
 
-        if gen_ids.numel() > 1:
-            prev = gen_ids[0].view(1, 1).to(device)
+        if thinking_gen_ids.numel() > 1:
+            prev =thinking_gen_ids[0].view(1, 1).to(device)
             # TODO: discard the non-thinking sequence
-            for t in range(1, gen_ids.numel()):
+            for t in range(1, thinking_gen_ids.numel()):
                 out = model(prev, use_cache=True, past_key_values=past, return_dict=True)
                 past = out.past_key_values
                 logits = out.logits[:, -1, :]
-                if gen_ids[t].item() not in split_ids_set:
-                    lp = F.log_softmax(logits, dim=-1)[0, gen_ids[t].to(device)].item()
-                    logps.append(lp)
-                prev = gen_ids[t].view(1, 1).to(device)
+                lp = F.log_softmax(logits, dim=-1)[0, thinking_gen_ids[t].to(device)].item()
+                logps.append(lp)
+                prev = thinking_gen_ids[t].view(1, 1).to(device)
 
     return torch.tensor(logps, dtype=torch.float32)
 
@@ -236,11 +237,10 @@ def load_model_and_tokenizer_single_npu(args, device):
 # Hidden-state saving (修复版)
 # ------------------------
 
-def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, save_path, think_end_id, split_ids, hs_device: str = 'auto'):
+def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, save_path, think_end_id, split_ids, hs_device: str = 'auto'):
     import os as _os
 
-    ids_flat = input_ids[0].tolist()
-    tokens = tokenizer.convert_ids_to_tokens(input_ids[0])
+    ids_flat = input_ids[0].tolist()  # full sequence
 
     def _find_subseq(seq, subseq):
         if not subseq:
@@ -252,7 +252,7 @@ def save_pangu_think_split_tokens_only(model, tokenizer, input_ids, full_text, s
         return None
 
     pos = _find_subseq(ids_flat, [think_end_id])
-    think_end_idx = pos if pos is not None else len(ids_flat)
+    think_end_idx = pos if pos is not None else len(ids_flat)  # relative to full sequence
 
     step_positions = []
     split_ids_set = set(split_ids.tolist())
@@ -575,12 +575,11 @@ def worker(args, rank, world_size, device):
         gen_token_ids = output.sequences[0][inputs.input_ids.shape[1]:].detach().cpu()
         try:
             gen_logps = compute_token_logprobs_streaming(
-                model, tokenizer,
+                model,
                 prompt_ids=inputs.input_ids,
                 gen_ids=gen_token_ids,
-                split_ids=split_ids,
+                think_end_id=think_end_id,
                 device=device,
-                score_dtype=args.score_dtype,
             )
         except torch.npu.OutOfMemoryError:
             print(f"[OOM][rank {rank}] logprob pass at idx={i}; skipping confidences.")
@@ -589,33 +588,43 @@ def worker(args, rank, world_size, device):
             print(f"[WARN][rank {rank}] logprob pass failed at idx={i}: {e}")
             gen_logps = torch.empty(0)
 
-        # 句级置信度（按 \n\n 切段；与原逻辑保持一致）
-        text_before_think = response_text.split('[unused17]')[0]
-        tokens_before_think = tokenizer.tokenize(text_before_think)
+        # 句级置信度（使用 split_ids 和 think_end_id 切段）
+        gen_token_ids_list = gen_token_ids.tolist()
+        split_ids_set = set(split_ids.tolist())
+        
+        # 找到 think_end 位置
+        try:
+            think_end_pos = gen_token_ids_list.index(think_end_id)
+        except ValueError:
+            think_end_pos = len(gen_token_ids_list)
+        
+        # 在 think_end 之前，根据 split_ids 划分段落
+        step_positions = []
+        for i in range(think_end_pos - 1):
+            # 当前 token 是分隔符，且下一个 token 不是分隔符时，标记为段落起始
+            if gen_token_ids_list[i] in split_ids_set and gen_token_ids_list[i + 1] not in split_ids_set:
+                step_positions.append(i + 1)
 
-        token_segments, current_segment = [], []
-        for token in tokens_before_think:
-            if "\n\n" in token:
-                if current_segment:
-                    token_segments.append(current_segment)
-                    current_segment = []
-            else:
-                current_segment.append(token)
-        if current_segment:
-            token_segments.append(current_segment)
-
+        # 计算每个段落的置信度
         confidences = []
-        start = 0
-        for segment in token_segments:
-            seg_ids = tokenizer.convert_tokens_to_ids(segment)
-            end = start + len(seg_ids)
-            if gen_logps.numel() > 0 and end > start and end <= gen_logps.numel():
-                seg_logps = gen_logps[start:end]
-                conf = _summarize_selected_logprobs(seg_logps, policy='avg2')
-                confidences.append(conf)
-            elif end > start:
-                confidences.append(0.0)
-            start = end
+        for idx, start_pos in enumerate(step_positions):
+            # 段落结束位置：下一个段落的起始位置，或 think_end
+            end_pos = step_positions[idx + 1] if idx + 1 < len(step_positions) else think_end_pos
+            
+            if gen_logps.numel() > 0 and start_pos < end_pos and end_pos <= gen_logps.numel():
+                seg_logps = []
+                for pos in range(start_pos, end_pos):
+                    if gen_token_ids_list[pos] not in split_ids_set:
+                        seg_logps.append(gen_logps[pos].item())
+                
+                if seg_logps:
+                    seg_logps_tensor = torch.tensor(seg_logps, dtype=torch.float32)
+                    conf = _summarize_selected_logprobs(seg_logps_tensor, policy='avg2')
+                    confidences.append(conf)
+                # else:
+                #     # 段落只有分隔符，置信度为 0
+                #     confidences.append(0.0)
+        
 
         # 先保存 hidden，再写 JSON 行（并保证 step_hidden_num 一定有值）
         step_hidden_num = -1
@@ -623,7 +632,7 @@ def worker(args, rank, world_size, device):
             if not os.path.exists(hidden_save_path):
                 full_inputs = tokenizer(full_text, return_tensors="pt")
                 step_hidden_num = save_pangu_think_split_tokens_only(
-                    model, tokenizer, full_inputs.input_ids.to(device), full_text, hidden_save_path,
+                    model, tokenizer, full_inputs.input_ids.to(device), hidden_save_path,
                     think_end_id,
                     split_ids,
                     hs_device=args.hs_device
@@ -673,6 +682,7 @@ def main():
     parser.add_argument('--hs_device', type=str, default='auto', choices=['auto', 'npu', 'cpu'])
     parser.add_argument('--score_dtype', type=str, default='bf16', choices=['bf16', 'fp16', 'fp32'])
     args = parser.parse_args()
+    set_seeds(42)
 
     is_dist, rank, world_size, local_rank, device = init_distributed_if_needed()
 

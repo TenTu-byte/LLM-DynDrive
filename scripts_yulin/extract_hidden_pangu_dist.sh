@@ -46,6 +46,6 @@ torchrun \
 	--model_name_or_path "$models/openPangu-Embedded-7B-V1.1" \
 	--dataset_dir "./Data" \
 	--dataset Math_Math \
-	--output_path "$outputs" \
+	--output_path "$outputs/test" \
   	--max_generated_tokens 16000 \
 	--trust_remote_code
