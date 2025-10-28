@@ -7,6 +7,7 @@ from typing import Optional
 
 import torch
 from torch.utils.data import TensorDataset, ConcatDataset
+from transformers import AutoTokenizer
 
 # =========================
 # 词表（命中即视为“包含词汇”）
@@ -87,15 +88,38 @@ def read_jsonl(path: str):
     with open(path, 'r', encoding='utf-8') as f:
         return [json.loads(line.strip()) for line in f if line.strip()]
 
-def split_segments_for_conf(resp_text: str):
+def split_segments_for_conf(resp_text: str, tokenizer):
     """
     仅统计 </think> 之前的内容；再按连续空行分段。
     """
     text = resp_text or ""
+
+    # 提取 think 结束标记之前的内容
     if "[unused17]" in text:  # ! adapt to pangu
         text = text.split("[unused17]")[0]
-    segs = re.split(r"\n\n+", text)
-    segs = [s.strip() for s in segs if len(s.strip()) > 0]
+
+    # 对整个文本进行 tokenize
+    token_ids = tokenizer.encode(text, add_special_tokens=False)
+    
+    # 获取 split token IDs
+    vocab = tokenizer.get_vocab()
+    split_ids_set = set([vocab[token] for token in vocab.keys() if "\n\n" in token])
+    
+    # 找到段落起始位置（split_id 后的第一个非 split_id token）
+    step_positions = []
+    for i in range(len(token_ids) - 1):
+        if token_ids[i] in split_ids_set and token_ids[i + 1] not in split_ids_set:
+            step_positions.append(i + 1)
+    
+    # 根据段落起始位置提取段落
+    segs = []
+    for idx, start_pos in enumerate(step_positions):
+        end_pos = step_positions[idx + 1] if idx + 1 < len(step_positions) else len(token_ids)
+        seg_token_ids = token_ids[start_pos:end_pos]
+        seg_text = tokenizer.decode(seg_token_ids, skip_special_tokens=True).strip()
+        if seg_text:
+            segs.append(seg_text)
+
     return segs
 
 
@@ -113,6 +137,7 @@ def build_dataset_from_layer_mixed(
     layer_id: int,
     json_item: dict,
     hidden_path: str,
+    tokenizer,
     threshold: float = 0.7,
     expected_offset: int = 1,
     verbose: bool = False
@@ -152,13 +177,14 @@ def build_dataset_from_layer_mixed(
     # 1) 关键词标签（与关键词脚本保持一致）
     responses_text = (json_item.get("generated_responses") or [""])[0]
     # ! since splitting seg is for lexicon matching, strict token-level \n\n splitting isn't needed here
-    segs = split_segments_for_conf(responses_text)
+    segs = split_segments_for_conf(responses_text, tokenizer)
     if expected_offset > 0 and len(segs) >= expected_offset:
         segs = segs[expected_offset:]  # discard the first seg
     lex_labels = [float(has_lexicon_hit(s)) for s in segs]  # 0/1
 
     # 2) 置信度标签（与置信度脚本保持一致：低信心=1，高信心=0）
     confs = confs_raw[expected_offset:]
+    print(f"tensor:{V}; lex_labels:{len(lex_labels)}; confs:{len(confs)}")
     # 截断保证不会超出 V
     confs = confs[:V]
     conf_labels = [1.0 if float(c) < threshold else 0.0 for c in confs]  # TODO: only one threshold?
@@ -184,6 +210,7 @@ def batch_build_all_mixed(
     layer_id: int,
     jsonl_path: str,
     hidden_dir: str,
+    tokenizer,
     threshold: float = 0.7,
     max_files: int = 100,
     expected_offset: int = 1,
@@ -199,6 +226,7 @@ def batch_build_all_mixed(
             layer_id=layer_id,
             json_item=data_json[i],
             hidden_path=hidden_path,
+            tokenizer=tokenizer,
             threshold=threshold,
             expected_offset=expected_offset,
             verbose=verbose
@@ -259,12 +287,21 @@ def main():
     parser.add_argument("--expected_offset", type=int, default=1,
                         help="期望 V = len(sentence_confidences) - expected_offset")
     parser.add_argument("--verbose", action="store_true")
+    parser.add_argument('--model_name_or_path', type=str, required=True)
     args = parser.parse_args()
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path,
+        use_fast=False,
+        trust_remote_code=True,
+        local_files_only=True
+    )
 
     merged = batch_build_all_mixed(
         layer_id=args.layer_id,
         jsonl_path=args.jsonl_path,
         hidden_dir=args.hidden_dir,
+        tokenizer=tokenizer,
         threshold=args.threshold,
         max_files=args.max_files,
         expected_offset=args.expected_offset,

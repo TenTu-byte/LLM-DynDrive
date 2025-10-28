@@ -23,6 +23,7 @@ from typing import Tuple
 import torch
 import torch_npu
 from torch.utils.data import ConcatDataset
+from transformers import AutoTokenizer
 
 # ===== 你的工程内已有的构建数据集函数 =====
 try:
@@ -284,14 +285,22 @@ def main():
     parser.add_argument("--gamma", type=float, default=1.5, help="[兼容保留]")
     parser.add_argument("--epsilon", type=float, default=150, help="[兼容保留]")
     parser.add_argument("--delta", type=float, default=35, help="[兼容保留]")
-
+    parser.add_argument('--model_name_or_path', type=str, required=True)
     args = parser.parse_args()
+
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model_name_or_path,
+        use_fast=False,
+        trust_remote_code=True,
+        local_files_only=True
+    )
 
     # 构建 (feat, label) 合并数据集
     merged = batch_build_all_mixed(  # TODO: how to determine the layer_id?
         layer_id=args.layer_id,
         jsonl_path=args.jsonl_path,
         hidden_dir=args.hidden_dir,
+        tokenizer=tokenizer,
         threshold=args.threshold,
         max_files=args.max_files,
         expected_offset=args.expected_offset,
