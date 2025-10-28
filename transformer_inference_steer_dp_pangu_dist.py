@@ -363,12 +363,6 @@ def worker(args, rank, world_size, local_rank, device):
         steer_vec=steer_vector,
         steer_coef=args.steer_coef,
         tokenizer=tokenizer,
-        q25c=args.q25c,
-        q75c=args.q75c,
-        low_val_1=args.low_val_1,
-        high_val_1=args.high_val_1,
-        q25v=args.q25v,
-        q75v=args.q75v,
         low_val_2=args.low_val_2,
         high_val_2=args.high_val_2
     )
