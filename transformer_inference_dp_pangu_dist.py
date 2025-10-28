@@ -260,7 +260,7 @@ def save_qwen2_think_split_tokens_only(model, tokenizer, input_ids, full_text, s
                 step_h = h.index_select(dim=0, index=idx).to('cpu', non_blocking=True)
             else:
                 step_h = torch.empty((0, h.shape[1]), dtype=h.dtype)
-            hidden_dict[layer_id] = {sample_id: {"step": step_h}}
+            hidden_dict[layer_id] = step_h
 
     orig_device = next(model.parameters()).device
     try:
