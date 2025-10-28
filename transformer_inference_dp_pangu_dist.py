@@ -172,7 +172,7 @@ def compute_token_logprobs_streaming(model, tokenizer, prompt_ids: torch.Tensor,
     amp_dtype = dtype_map.get(score_dtype, torch.bfloat16)
 
     logps = []
-    with torch.inference_mode(), torch.npu.amp.autocast(enabled=(device.type == 'npu'), dtype=amp_dtype):
+    with torch.inference_mode():
         out = model(prompt_ids.to(device), use_cache=True, return_dict=True)
         past = out.past_key_values
         logits = out.logits[:, -1, :]
