@@ -10,9 +10,9 @@ cd ${PROJECT_DIR}
 
 
 python layer_analysis.py \
-  --jsonl_path $DATASET_DIR/outputs_yulin_gy/openPangu-Embedded-7B-V1.1/Math_Math/origin_temp0.7_maxlen16000.jsonl \
-  --hidden_dir $DATASET_DIR/outputs_yulin_gy/openPangu-Embedded-7B-V1.1/Math_Math/ \
-  --layers 1-34 \
+  --jsonl_path $DATASET_DIR/outputs_yulin_gy/test3/openPangu-Embedded-7B-V1.1/Math_Math/origin_temp0.7_maxlen16000.jsonl \
+  --hidden_dir $DATASET_DIR/outputs_yulin_gy/test3/openPangu-Embedded-7B-V1.1/Math_Math/ \
+  --layers 20-34 \
   --max_files 500 \
   --expected_offset 0 \
   --alpha 1.0 \
