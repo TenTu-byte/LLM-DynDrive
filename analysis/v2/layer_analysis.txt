@@ -1,0 +1,15 @@
+Layer 20: R² = 0.4086 | Spearman ρ = 0.6717
+Layer 21: R² = 0.4131 | Spearman ρ = 0.6752
+Layer 22: R² = 0.4199 | Spearman ρ = 0.6806
+Layer 23: R² = 0.4291 | Spearman ρ = 0.6864
+Layer 24: R² = 0.4305 | Spearman ρ = 0.6880
+Layer 25: R² = 0.4325 | Spearman ρ = 0.6892
+Layer 26: R² = 0.4327 | Spearman ρ = 0.6898
+Layer 27: R² = 0.4295 | Spearman ρ = 0.6875
+Layer 28: R² = 0.4282 | Spearman ρ = 0.6872
+Layer 29: R² = 0.4282 | Spearman ρ = 0.6873
+Layer 30: R² = 0.4296 | Spearman ρ = 0.6875
+Layer 31: R² = 0.4282 | Spearman ρ = 0.6878
+Layer 32: R² = 0.4278 | Spearman ρ = 0.6883
+Layer 33: R² = 0.4396 | Spearman ρ = 0.6968
+Layer 34: R² = 0.3716 | Spearman ρ = 0.6443
