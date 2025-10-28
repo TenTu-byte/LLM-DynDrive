@@ -184,7 +184,7 @@ def build_dataset_from_layer_mixed(
 
     # 2) 置信度标签（与置信度脚本保持一致：低信心=1，高信心=0）
     confs = confs_raw[expected_offset:]
-    print(f"tensor:{V}; lex_labels:{len(lex_labels)}; confs:{len(confs)}")
+    # print(f"tensor:{V}; lex_labels:{len(lex_labels)}; confs:{len(confs)}")
     # 截断保证不会超出 V
     confs = confs[:V]
     conf_labels = [1.0 if float(c) < threshold else 0.0 for c in confs]  # TODO: only one threshold?
