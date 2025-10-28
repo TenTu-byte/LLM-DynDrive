@@ -37,18 +37,18 @@ printenv
 
 # Dataset switches (1=run, 0=skip)
 run_aime2024=${run_aime2024:-1}
-run_math500=${run_math500:-1}
 run_aime2025=${run_aime2025:-1}
 run_amc23=${run_amc23:-1}
+run_math500=${run_math500:-1}
 run_gsm8k=${run_gsm8k:-1}
 run_olympiad=${run_olympiad:-1}
 
 # Build datasets array based on switches
 datasets=()
 [[ $run_aime2024 -eq 1 ]] && datasets+=(Math_AIME2024)
-[[ $run_math500 -eq 1 ]] && datasets+=(Math_Math500)
 [[ $run_aime2025 -eq 1 ]] && datasets+=(Math_AIME2025)
 [[ $run_amc23 -eq 1 ]] && datasets+=(Math_AMC23)
+[[ $run_math500 -eq 1 ]] && datasets+=(Math_Math500)
 [[ $run_gsm8k -eq 1 ]] && datasets+=(Math_GSM8K)
 [[ $run_olympiad -eq 1 ]] && datasets+=(Math_Olympiad)
 
