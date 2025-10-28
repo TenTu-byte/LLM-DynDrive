@@ -67,8 +67,8 @@ for ds in "${datasets[@]}"; do
         --model_name_or_path "$models/openPangu-Embedded-7B-V1.1" \
         --dataset_dir "./Data/" \
         --dataset "$ds" \
-        --output_path "$outputs/outputs_steer_dynamic" \
-        --steer_vector_path "$outputs/openPangu-Embedded-7B-V1.1/Math_Math/steer_vector_layer${steer_layer}_conf_mixed.pt" \
+        --output_path "$outputs/test3/outputs_steer_dynamic" \
+        --steer_vector_path "$outputs/test3/openPangu-Embedded-7B-V1.1/Math_Math/steer_vector_layer${steer_layer}_conf_mixed.pt" \
         --steer_layer $steer_layer \
         --steer_coef -1 \
         --run_id $run_id \
@@ -85,14 +85,23 @@ done
 # run_id=v0
 # low_val_2=None
 # high_val_2=None
+#
 # v1:
 # steer_layer=33
 # run_id=v1
 # low_val_2=None
 # high_val_2=None
+#
+# v2:
+# steer_layer=26
+# run_id=v2
+# low_val_2=None
+# high_val_2=None
+#
 # all:
 # max_tokensS=16000
 # seed=42
+
 
 # --q25c $q25c \
 # --q75c $q75c \

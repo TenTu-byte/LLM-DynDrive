@@ -9,7 +9,7 @@ def read_jsonl(file_path):
     
 
 @torch.no_grad()
-def compute_global_diff_stats(jsonl_path: str, expected_offset: int = 1) -> Tuple[Optional[float], Optional[float], Optional[float], int]:
+def compute_global_diff_stats(jsonl_path: str) -> Tuple[Optional[float], Optional[float], Optional[float], int]:
     """
     新增：统计 diff 的 q25 / mean / q75。
     d = ((a - b)^2) / 4.0
@@ -33,9 +33,9 @@ def compute_global_diff_stats(jsonl_path: str, expected_offset: int = 1) -> Tupl
         #     print(f"[ERROR] idx={idx}: conf_num ({conf_num_i}) != hidden_num ({hidden_num_i}) + expected_offset ({expected_offset}); skip")
         #     continue
 
-        if not confs or len(confs) <= expected_offset:
+        if not confs or len(confs) <= 1:
             continue
-        for j in range(expected_offset, len(confs)): 
+        for j in range(1, len(confs)): 
             try:
                 a = float(confs[j])
                 b = float(confs[j-1])
@@ -54,9 +54,9 @@ def compute_global_diff_stats(jsonl_path: str, expected_offset: int = 1) -> Tupl
 
 
 if __name__ == "__main__":
-    jsonl_path = "/home/ma-user/work/dataset/outputs_yulin_gy/openPangu-Embedded-7B-V1.1/Math_Math/origin_temp0.7_maxlen16000.jsonl"
-    expected_offset = 1
-    q25, mean, q75, compute_num = compute_global_diff_stats(jsonl_path, expected_offset)
+    jsonl_path = "/home/ma-user/work/dataset/outputs_yulin_gy/test3/openPangu-Embedded-7B-V1.1/Math_Math/origin_temp0.7_maxlen16000.jsonl"
+    expected_offset = 0
+    q25, mean, q75, compute_num = compute_global_diff_stats(jsonl_path)
     print("q25: ", q25)
     print("mean: ", mean)
     print("q75: ", q75)
