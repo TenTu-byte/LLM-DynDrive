@@ -801,13 +801,13 @@ class PanguEmbeddedForCausalLM(PanguEmbeddedPreTrainedModel, GenerationMixin):
                 # —— 手动输入：置信分位 + 目标（保持你原来的风格，只是多了 var 的量）——
                 q25c = self.q25c if self.q25c is not None else 0.74   # v0:0.75; v1:0.74
                 q75c = self.q75c if self.q75c is not None else 0.92   # v0:0.93; v1:0.92
-                low_val_1 = self.low_val_1 if self.low_val_1 is not None else -0.99  # F(q25c), v0:-1.14; v1:-0.99
+                low_val_1 = self.low_val_1 if self.low_val_1 is not None else -1.17  # F(q25c), v0:-1.14; v1:-0.99
                 high_val_1 = self.high_val_1 if self.high_val_1 is not None else 0.01   # F(1), 0.01
 
                 # —— 新增：方差分位 + 两个目标 —— 
-                q25v = self.q25v if self.q25v is not None else 0.000263  # v0:0.000289, v1:0.000263
-                q75v = self.q75v if self.q75v is not None else 0.006008  # v0:0.005617, v1:0.006008
-                low_val_2 = self.low_val_2 if self.low_val_2 is not None else -3.97  # f(q25c, q75v)  v0:-5.54; v1:-3.97
+                q25v = self.q25v if self.q25v is not None else 0.000270  # v0:0.000289, v1:0.000263
+                q75v = self.q75v if self.q75v is not None else 0.006074  # v0:0.005617, v1:0.006008
+                low_val_2 = self.low_val_2 if self.low_val_2 is not None else -4.0  # f(q25c, q75v)  v0:-5.54; v1:-3.97
                 high_val_2 = self.high_val_2 if self.high_val_2 is not None else 0.1   # f(1, q25v), 0.1
 
                 # 防呆：分位数排序，避免写反造成 IQR 负值
