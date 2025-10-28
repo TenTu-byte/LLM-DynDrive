@@ -25,7 +25,7 @@ from torch.utils.data import ConcatDataset
 
 # ===== 你的工程内已有的构建数据集函数 =====
 try:
-    from hidden_analysis_mixed import batch_build_all_mixed
+    from hidden_analysis_mixed_pangu import batch_build_all_mixed
 except Exception as e:
     raise ImportError(
         "无法从 hidden_analysis_mixed 导入 batch_build_all_mixed。请确认该文件与本脚本同目录或在 PYTHONPATH 中。"
@@ -274,7 +274,7 @@ def main():
     # 有效参数（与原脚本一致）
     parser.add_argument("--center_block_size", type=int, default=65536,
                         help="中心到集合距离的分块大小（一次处理的向量条数）")
-    parser.add_argument("--device", type=str, choices=["cpu", "cuda"], default="cpu")
+    parser.add_argument("--device", type=str, choices=["cpu", "npu"], default="cpu")
     parser.add_argument("--report_path", type=str, default="",
                         help="可选：写出 JSON 报告到该路径")
 

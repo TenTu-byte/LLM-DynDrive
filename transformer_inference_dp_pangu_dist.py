@@ -657,7 +657,7 @@ def main():
     parser.add_argument('--max_generated_tokens', type=int, default=512)
     parser.add_argument('--trust_remote_code', action='store_true')
     parser.add_argument('--num_gpus', type=int, default=1)
-    parser.add_argument('--hs_device', type=str, default='auto', choices=['auto', 'cuda', 'cpu'])
+    parser.add_argument('--hs_device', type=str, default='auto', choices=['auto', 'npu', 'cpu'])
     parser.add_argument('--score_dtype', type=str, default='bf16', choices=['bf16', 'fp16', 'fp32'])
     args = parser.parse_args()
 
