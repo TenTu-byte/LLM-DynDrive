@@ -1,0 +1,9 @@
+# Experiment
+*.zip
+
+# Python
+__pycache__/
+*.pyc
+*.egg-info
+dist/
+.vscode/
