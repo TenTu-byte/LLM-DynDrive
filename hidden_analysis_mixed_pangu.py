@@ -6,6 +6,7 @@ import argparse
 from typing import Optional
 
 import torch
+import torch_npu
 from torch.utils.data import TensorDataset, ConcatDataset
 
 # =========================

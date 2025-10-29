@@ -21,6 +21,7 @@ import argparse
 from typing import Tuple
 
 import torch
+import torch_npu
 from torch.utils.data import ConcatDataset
 
 # ===== 你的工程内已有的构建数据集函数 =====
