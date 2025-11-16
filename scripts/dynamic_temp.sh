@@ -8,7 +8,7 @@ nvidia-smi
 PROJECT_DIR=$(dirname "$(dirname "$(realpath "$0")")")
 cd ${PROJECT_DIR}
 
-printenv
+env
 
 # Dataset switches (1=run, 0=skip)
 run_aime2024=${run_aime2024:-1}
