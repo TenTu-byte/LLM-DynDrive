@@ -3,6 +3,9 @@ set -ex
 nvidia-smi
 
 # Setup environment
+python -m venv myenv
+source myenv/bin/activate
+pip install $outputs/wheels/*.whl --no-index --no-deps
 
 # Change working directory
 PROJECT_DIR=$(dirname "$(dirname "$(realpath "$0")")")
