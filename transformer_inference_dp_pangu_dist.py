@@ -472,7 +472,7 @@ def merge_all_shards(output_dir, base_name, remove_shards=True):
 # ------------------------
 
 def worker(args, rank, world_size, device):
-    set_seeds(42 + rank)
+    set_seeds(42 + rank)  # ! whether to vary by rank?
     dataset_file = 'train.jsonl' if args.dataset == 'Math_Math' else 'test.jsonl'
     dataset_path = os.path.join(args.dataset_dir, args.dataset, dataset_file)
     questions = read_jsonl(dataset_path)
@@ -561,7 +561,7 @@ def worker(args, rank, world_size, device):
                     return_dict_in_generate=True,
                     pad_token_id=tokenizer.eos_token_id,
                 )
-        except torch.npu.OfMemoryError:
+        except torch.npu.OutOfMemoryError:
             print(f"[OOM][rank {rank}] idx={i} : {q_text[:80]}... skipping.")
             _clear_device()
             pbar.update(1)
@@ -594,7 +594,7 @@ def worker(args, rank, world_size, device):
             gen_logps = torch.empty(0)
 
         text_before_think = response_text.split('[unused17]')[0]
-        text_segments = rsplit(r'\n\n+', text_before_think)
+        text_segments = rsplit(r'\n\n+', text_before_think)  # TODO: do not use texts to split tokens
         confidences = []
         start = 0
         for segment in text_segments:

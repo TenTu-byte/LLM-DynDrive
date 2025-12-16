@@ -304,7 +304,7 @@ def main():
     ap.add_argument("--layers", type=str, default="28-30", help="如 0-28 或 0,3,7-10")
     ap.add_argument("--max_files", type=int, default=500)
     ap.add_argument("--expected_offset", type=int, default=1)
-    ap.add_argument("--file_pattern", type=str, default="hidden_{idx}.pt")
+    ap.add_argument("--file_pattern", type=str, default="hidden_{idx:03d}.pt")
 
     ap.add_argument("--alpha", type=float, default=1.0)
     ap.add_argument("--pca_components", type=int, default=64)

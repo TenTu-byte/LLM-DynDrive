@@ -13,7 +13,7 @@ from torch.utils.data import TensorDataset, ConcatDataset
 # 词表（命中即视为“包含词汇”）
 # 来自关键词脚本，保留原有模式与正则构造
 # =========================
-LEXICON_BASE = [
+LEXICON_BASE = [  # TODO: update for new vocabulary
     # 不确定/反思类的低信心词汇////计算类/不熟悉类的低信心词汇
     "alternatively", "alternative", "another", "perhaps", "maybe", "wait", "but",
     "think again", "make sure", "just to ensure", "there any other", "some other",
@@ -38,7 +38,7 @@ def _token_pattern(tok: str) -> str:
     tok = _normalize_text(tok).lower().strip()
     parts = re.split(r"\s+", tok)
 
-    def word2regex(w: str) -> str:
+    def word2regex(w: str) -> str:  # TODO: update for new vocabulary
         if w == "verify":
             return r"verif(?:y|ies|ied|ying|ication(?:s)?)"
         if w == "alternative":
