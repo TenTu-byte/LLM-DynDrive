@@ -1327,15 +1327,17 @@ class Qwen2ForCausalLM(Qwen2PreTrainedModel, GenerationMixin):
 
                     return F
                 # —— 当前数据集的统计量（可替换为动态传入）——
-                q25 = 0.70
-                q75 = 0.92
-                low_val = -3.3 # 来自统计量
-                tau = 0.1  # 小正数（缓解 overconfident）；
+                q25 = 0.67##1.5b:0.593，7b:0.71,32b:0.67
+                q75 = 0.94##1.5b:0.898,7b:0.95,32b:0.903
+                low_val = -2.96 # 来自统计量##1.5b:-2.052,7b:2.8(1.28),32b:2.27
+                tau = 0.1  # 小正数（缓解 overconfident）；##需要测0,0.1(Ours),0.5,1
 
                 # 构造 F，并得到 updated
-                F = build_F(q25, q75, low_val=low_val, tau=tau)  # F(q25)≈-3, F(q75)=0, F(1)≈tau
+                F = build_F(q25, q75, low_val=low_val, tau=tau)  # F(q25)=low_val, F(q75)=0, F(1)=tau
                 updated = F(mean_max) # mean_max 可以是标量或张量（与原代码保持一致）
+                #updated = 0 # 测baseline
                 self._coefs[ready_mask] = updated
+
                 # reset accumulators for those samples
                 self._step_prob_sum[ready_mask] = 0.0
                 self._step_tok_count[ready_mask] = 0
