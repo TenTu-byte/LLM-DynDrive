@@ -117,13 +117,21 @@ def build_output_paths(args):
     # Always include seed
     components.append(f"seed{args.seed}")
     
-    # Optional low_val_2
-    if args.low_val_2 is not None:
-        components.append(f"low2_{args.low_val_2}")
+    # Optional q25
+    if args.q25 is not None:
+        components.append(f"q25_{args.q25}")
     
-    # Optional high_val_2
-    if args.high_val_2 is not None:
-        components.append(f"high2_{args.high_val_2}")
+    # Optional q75
+    if args.q75 is not None:
+        components.append(f"q75_{args.q75}")
+    
+    # Optional low_val
+    if args.low_val is not None:
+        components.append(f"low_{args.low_val}")
+    
+    # Optional tau
+    if args.tau is not None:
+        components.append(f"tau_{args.tau}")
     
     base_name = "_".join(components)
     return output_dir, base_name

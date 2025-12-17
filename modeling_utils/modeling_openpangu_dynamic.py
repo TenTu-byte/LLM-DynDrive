@@ -791,7 +791,7 @@ class PanguEmbeddedForCausalLM(PanguEmbeddedPreTrainedModel, GenerationMixin):
                 q25 = self.q25 if self.q25 is not None else 0.75   # v0:0.75; v1:0.74; v2:0.74
                 q75 = self.q75 if self.q75 is not None else 0.92   # v0:0.93; v1:0.92; v2:0.92
                 low_val = self.low_val if self.low_val is not None else -3.30  # v0:-5.54; v1:-3.97; v2:-4.0
-                tau = self.tau if self.tau is not None else 0.01   # F(1), 0.01
+                tau = self.tau if self.tau is not None else 0.1
 
                 # 防呆：分位数排序，避免写反造成 IQR 负值
                 q25, q75 = (min(q25, q75), max(q25, q75))
