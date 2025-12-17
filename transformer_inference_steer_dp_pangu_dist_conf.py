@@ -116,6 +116,9 @@ def build_output_paths(args):
     
     # Always include seed
     components.append(f"seed{args.seed}")
+
+    # Always include steer_layer
+    components.append(f"layer{args.steer_layer}")
     
     # Optional q25
     if args.q25 is not None:
@@ -352,7 +355,7 @@ def sample_with_tracking(
                 logits = out.logits[:, -1, :]
 
         # 采样一步（top-p + temperature）
-        next_token, next_logprob = top_p_sampling_step(logits, temperature, top_p, output_logprobs=True)
+        next_token, next_logprob = top_p_sampling_step(logits, temperature, top_p, output_logprobs=False)
         token_logprobs.append(next_logprob)
 
         # 结束条件
@@ -482,8 +485,7 @@ def worker(args, rank, world_size, local_rank, device):
             "idx": i,  # store idx for robust checkpointing
             "question": qtext,
             "generated_responses": [response_text],
-            "gold_answer": q.get("answer", ""),
-            "token_logprobs": step_logprobs
+            "gold_answer": q.get("answer", "")
         }
 
         # Append to shard file
