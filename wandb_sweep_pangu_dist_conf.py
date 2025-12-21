@@ -279,7 +279,7 @@ def main() -> None:
     parser.add_argument(
         "--entry_script",
         type=str,
-        default="scripts_yulin/dynamic_steer_pangu_dist_conf.sh",
+        default="scripts_yulin/dynamic_steer_pangu_dist_conf_atom.sh",
         help="Existing entry script used by the cluster.",
     )
     parser.add_argument(
