@@ -63,11 +63,11 @@ for ds in "${datasets[@]}"; do
         --nproc_per_node=$MA_NUM_GPUS \
         --master_addr=$MASTER_ADDR \
         --master_port=29500 \
-        transformer_inference_steer_dp_pangu_dist_conf.py \
+        transformer_inference_steer_dp_pangu_dist_conf_earlyexit.py \
         --model_name_or_path "$models/openPangu-Embedded-7B-V1.1" \
         --dataset_dir "./Data/" \
         --dataset "$ds" \
-        --output_path "$outputs/beta/outputs_steer_dynamic_conf" \
+        --output_path "$outputs/beta/outputs_steer_dynamic_conf_earlyexit" \
         --steer_vector_path "$outputs/beta/openPangu-Embedded-7B-V1.1/Math_Math/steer_vector_layer${steer_layer}_conf_mixed.pt" \
         --steer_layer $steer_layer \
         --steer_coef -1 \
