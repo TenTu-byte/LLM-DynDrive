@@ -52,6 +52,13 @@ datasets=()
 [[ $run_gsm8k -eq 1 ]] && datasets+=(Math_GSM8K)
 [[ $run_olympiad -eq 1 ]] && datasets+=(Math_Olympiad)
 
+# Token budget mapping by dataset
+declare -A TOKEN_BUDGET_MAP=(
+  ["Math_Math500"]=4700
+  ["Math_AIME2025"]=10500
+  ["Math_GSM8K"]=1600
+)
+
 echo "=== Datasets to run: ${datasets[@]} ==="
 
 # Multi-node inference
@@ -73,7 +80,7 @@ for ds in "${datasets[@]}"; do
         --steer_coef -1 \
         --run_id $run_id \
         --max_generated_tokens $max_tokens \
-        --token_budget $token_budget \
+        --token_budget ${TOKEN_BUDGET_MAP[$ds]} \
         --seed $seed \
         --q25 $q25 \
         --q75 $q75 \
