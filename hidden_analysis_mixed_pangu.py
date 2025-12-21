@@ -13,7 +13,8 @@ from torch.utils.data import TensorDataset, ConcatDataset
 # 词表（命中即视为“包含词汇”）
 # 来自关键词脚本，保留原有模式与正则构造
 # =========================
-LEXICON_BASE = [  # TODO: update for new vocabulary
+# ! v0 (raw)
+LEXICON_BASE = [
     # 不确定/反思类的低信心词汇////计算类/不熟悉类的低信心词汇
     "alternatively", "alternative", "another", "perhaps", "maybe", "wait", "but",
     "think again", "make sure", "just to ensure", "there any other", "some other",
@@ -21,6 +22,19 @@ LEXICON_BASE = [  # TODO: update for new vocabulary
     "or something", "let me check", "hold on", "double check", "however",
     "confusing", "differently", "careful", "sometimes", "alternate"
 ]
+
+# ! v1 (expanded)
+# LEXICON_BASE = [
+#     "alternatively", "alternative", "another", "perhaps", "maybe", "wait", "but",
+#     "think again", "make sure", "just to ensure", "there any other", "some other",
+#     "should consider", "about whether", "if they have", "i was", "any errors",
+#     "or something", "let me check", "hold on", "double check", "however",
+#     "confusing", "differently", "careful", "sometimes", "alternate",
+#     # ! newly added
+#     "Hum", "Hummm", "check", "perhaps", "double-check", "recall", "also think", "remember",
+#     "let me ensure", "be certain", "but what if", "I'm not sure", "could it be", "is that right"
+# ]
+
 
 def _normalize_text(s: str) -> str:
     # 引号 & 破折号/连字符统一
@@ -38,7 +52,7 @@ def _token_pattern(tok: str) -> str:
     tok = _normalize_text(tok).lower().strip()
     parts = re.split(r"\s+", tok)
 
-    def word2regex(w: str) -> str:  # TODO: update for new vocabulary
+    def word2regex(w: str) -> str:
         if w == "verify":
             return r"verif(?:y|ies|ied|ying|ication(?:s)?)"
         if w == "alternative":
@@ -53,6 +67,15 @@ def _token_pattern(tok: str) -> str:
             return r"sometimes?"
         if w == "alternate":
             return r"alternat(?:e|es|ed|ing)"
+        
+        # ! newly added (v1)
+        if w == "check":
+            return r"check(?:s|ed|ing)?"
+        if w == "recall":
+            return r"recall(?:s|ed|ing)?"
+        if w == "remember":
+            return r"remember(?:s|ed|ing)?"
+    
         # 默认严格词形
         return re.escape(w)
 
