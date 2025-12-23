@@ -136,6 +136,10 @@ def build_output_paths(args):
     if args.tau is not None:
         components.append(f"tau_{args.tau}")
     
+    # Optional token_budget
+    if args.token_budget is not None:
+        components.append(f"tbudget{args.token_budget}")
+    
     base_name = "_".join(components)
     return output_dir, base_name
 
@@ -440,8 +444,8 @@ def worker(args, rank, world_size, local_rank, device):
     think_end_ids = None
     if args.token_budget is not None and args.token_budget > 0:
         think_budget = int(args.token_budget)
-        answer_budget = max(1, think_budget // 4)
-        think_end_ids = tokenizer.encode("\n</think>\n\n", add_special_tokens=False)
+        # answer_budget = max(1, think_budget // 4)  # ! remove answer budget here
+        think_end_ids = tokenizer.encode("\n[unused17]\n\n", add_special_tokens=False)
 
     # Load steer vector
     steer_vector = torch.load(args.steer_vector_path, map_location="cpu").to(device, dtype=dtype)

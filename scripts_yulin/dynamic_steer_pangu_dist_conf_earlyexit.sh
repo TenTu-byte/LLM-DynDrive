@@ -54,9 +54,9 @@ datasets=()
 
 # Token budget mapping by dataset
 declare -A TOKEN_BUDGET_MAP=(
-  ["Math_Math500"]=4700
-  ["Math_AIME2025"]=10500
-  ["Math_GSM8K"]=1600
+  ["Math_Math500"]=$budget_math500
+  ["Math_AIME2025"]=$budget_aime25
+  ["Math_GSM8K"]=$budget_gsm8k
 )
 
 echo "=== Datasets to run: ${datasets[@]} ==="
