@@ -35,13 +35,18 @@ fi
 
 printenv
 
-# Execute the save_all_steps script
-python -u save_all_steps.py \
+# Multi-node save_all_steps
+torchrun \
+  --nnodes=$MA_NUM_HOSTS \
+  --node_rank=$VC_TASK_INDEX \
+  --nproc_per_node=$MA_NUM_GPUS \
+  --master_addr=$MASTER_ADDR \
+  --master_port=29500 \
+  save_all_steps.py \
   --model_name_or_path "$models/openPangu-Embedded-7B-V1.1" \
   --dataset_dir "./Data/" \
   --dataset "Math_Math" \
   --output_path "$outputs/icml" \
-  --num_gpus 8 \
   --trust_remote_code \
   --save_step_hs \
   --hs_device auto
