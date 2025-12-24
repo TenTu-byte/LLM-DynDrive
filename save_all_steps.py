@@ -390,7 +390,7 @@ def save_double_newline_token_hs_first_only(
 
 
 # ------------------------
-# NEW: save ALL "\n\n" token hidden states BEFORE </think>
+# NEW: save ALL "\n\n" token hidden states BEFORE [unused17]
 # ------------------------
 
 def save_double_newline_token_hs_before_think_all(
@@ -667,8 +667,8 @@ def print_double_newline_token_info_once(tok, rank: int):
 def worker(args, rank, world_size, device):
     set_seeds(args.seed + rank)
 
-    dataset_path = os.path.join(args.dataset_dir, args.dataset, "test.jsonl")
-    data = read_jsonl(dataset_path)
+    dataset_path = os.path.join(args.dataset_dir, args.dataset, "train.jsonl")
+    data = read_jsonl(dataset_path)[:500]
     N = len(data)
 
     output_dir, base_name = build_output_paths(args)
@@ -836,6 +836,15 @@ def main():
     args = ap.parse_args()
 
     is_dist, rank, world_size, local_rank, device = init_distributed_if_needed()
+
+    # 打印接收到的参数
+    if rank == 0:
+        print("=" * 80)
+        print("Received Arguments:")
+        print("=" * 80)
+        for arg, value in vars(args).items():
+            print(f"  {arg} = {value}")
+        print("=" * 80)
 
     worker(args, rank, world_size, device)
 
