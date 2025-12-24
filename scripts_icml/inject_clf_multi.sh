@@ -35,14 +35,52 @@ fi
 
 printenv
 
-python -u inject_clf_multi.py \
-  --model_name_or_path "$models/openPangu-Embedded-7B-V1.1" \
-  --dataset_dir "./Data/" \
-  --dataset "Math_AIME2025" \
-  --output_path "$outputs/beta/outputs_steer_dynamic_clf_multicheck" \
-  --num_gpus 8 \
-  --trust_remote_code \
-  --hs_device auto \
-  --insert_text "\n[unused17]\n\n" \
-  --clf "$outputs/icml/openPangu-Embedded-7B-V1.1/Math_Math/classifer/remain_clf_allk/remain_clf.joblib" \
-  --meta "$outputs/icml/openPangu-Embedded-7B-V1.1/Math_Math/classifer/remain_clf_allk/remain_clf_meta.json"
+# Dataset switches (1=run, 0=skip)
+run_aime2024=${run_aime2024:-1}
+run_aime2025=${run_aime2025:-1}
+run_amc23=${run_amc23:-1}
+run_math500=${run_math500:-1}
+run_gsm8k=${run_gsm8k:-1}
+run_olympiad=${run_olympiad:-1}
+
+# Build datasets array based on switches
+datasets=()
+[[ $run_aime2024 -eq 1 ]] && datasets+=(Math_AIME2024)
+[[ $run_aime2025 -eq 1 ]] && datasets+=(Math_AIME2025)
+[[ $run_amc23 -eq 1 ]] && datasets+=(Math_AMC23)
+[[ $run_math500 -eq 1 ]] && datasets+=(Math_Math500)
+[[ $run_gsm8k -eq 1 ]] && datasets+=(Math_GSM8K)
+[[ $run_olympiad -eq 1 ]] && datasets+=(Math_Olympiad)
+
+echo "=== Datasets to run: ${datasets[@]} ==="
+
+# Multi-node inference
+for ds in "${datasets[@]}"; do
+    echo "=== Running dataset: ${ds} ==="
+		torchrun \
+				--nnodes=$MA_NUM_HOSTS \
+				--node_rank=$VC_TASK_INDEX \
+				--nproc_per_node=$MA_NUM_GPUS \
+				--master_addr=$MASTER_ADDR \
+				--master_port=29500 \
+				inject_clf_multi.py \
+				--model_name_or_path "$models/openPangu-Embedded-7B-V1.1" \
+				--dataset_dir "./Data/" \
+				--dataset "$ds" \
+				--output_path "$outputs/beta/outputs_steer_dynamic_clf_multicheck" \
+				--steer_vector_path "$outputs/beta/openPangu-Embedded-7B-V1.1/Math_Math/steer_vector_layer${steer_layer}_conf_mixed.pt" \
+				--steer_layer $steer_layer \
+				--steer_coef -1 \
+				--run_id $run_id \
+				--max_generated_tokens $max_tokens \
+				--seed $seed \
+				--q25 $q25 \
+				--q75 $q75 \
+				--low_val $low_val \
+				--tau $tau \
+				--insert_text "\n[unused17]\n\n" \
+				--hs_device auto \
+				--clf "$outputs/icml/openPangu-Embedded-7B-V1.1/Math_Math/classifer/remain_clf_allk/remain_clf.joblib" \
+				--meta "$outputs/icml/openPangu-Embedded-7B-V1.1/Math_Math/classifer/remain_clf_allk/remain_clf_meta.json"
+    echo "=== Finished ${ds} ==="
+done
