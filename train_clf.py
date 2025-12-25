@@ -403,7 +403,7 @@ def main():
                     help="Normalization for Ridge scan target (remain_length).")
 
     ap.add_argument("--q_min", type=float, default=0.01)
-    ap.add_argument("--q_max", type=float, default=0.5)
+    ap.add_argument("--q_max", type=float, default=0.3)
     ap.add_argument("--q_steps", type=int, default=40)
     ap.add_argument("--pos_is_short", action="store_true",
                     help="If set, y=1 means remain_length <= threshold. Otherwise y=1 means remain_length >= threshold.")
@@ -559,8 +559,8 @@ def main():
     out_dir = (args.out_dir.strip() or os.path.join(folders[0], "remain_clf"))
     os.makedirs(out_dir, exist_ok=True)
 
-    joblib_path = os.path.join(out_dir, "remain_clf.joblib")
-    meta_path = os.path.join(out_dir, "remain_clf_meta.json")
+    joblib_path = os.path.join(out_dir, f"remain_clf_qmax{args.q_max:.2f}.joblib")
+    meta_path = os.path.join(out_dir, f"remain_clf_meta_qmax{args.q_max:.2f}.json")
 
     joblib.dump(clf_final, joblib_path)
 
