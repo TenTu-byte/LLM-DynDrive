@@ -67,8 +67,9 @@ for ds in "${datasets[@]}"; do
 				--model_name_or_path "$models/openPangu-Embedded-7B-V1.1" \
 				--dataset_dir "./Data/" \
 				--dataset "$ds" \
-				--output_path "$outputs/icml/outputs_baseline_clf/no_escape" \
+				--output_path "$outputs/icml/outputs_baseline_clf" \
 				--max_generated_tokens $max_tokens \
+				--insert_text "\n[unused17]\n\n" \
 				--seed $seed \
 				--hs_device auto \
 				--clf "$outputs/icml/openPangu-Embedded-7B-V1.1/Math_Math/classifer/remain_clf_allk/remain_clf_qmax${q_max}.joblib" \
