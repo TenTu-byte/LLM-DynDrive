@@ -7,7 +7,7 @@ import torch
 import torch.distributed as dist
 from torch.utils.data.distributed import DistributedSampler
 from tqdm import tqdm
-from transformers import AutoTokenizer, StoppingCriteria, StoppingCriteriaList
+from transformers import AutoTokenizer, StoppingCriteria
 from re import split as rsplit
 import random
 import numpy as np
@@ -232,7 +232,6 @@ def build_stop_ids_contains(tok, needle: str = "\n\n"):
         raise RuntimeError(f'No tokens containing "{needle}" found in tokenizer vocab.')
     return stop_ids
 
-
 # ------------------------
 # Stop criteria: stop when last generated token is in stop_ids
 # ------------------------
@@ -249,67 +248,9 @@ class StopOnTokenIdSet(StoppingCriteria):
             return False
         return int(input_ids[0, -1]) in self.stop_ids
 
-
 # ------------------------
 # Classifier feature extraction at a given position pos_full
 # ------------------------
-
-def extract_feature_at_pos(
-    model,
-    full_ids_1xT: torch.Tensor,   # [1, T] on device
-    hs_device: str,
-    layer: int,
-    pos_full: int,
-):
-    """
-    Return: rep np.float32 [H] on CPU, or None if fail
-    """
-    rep = None
-
-    def _forward_on(device):
-        nonlocal rep
-        with torch.inference_mode():
-            out = model(full_ids_1xT.to(device), output_hidden_states=True, use_cache=False, return_dict=True)
-        hs = out.hidden_states
-        if hs is None or len(hs) == 0:
-            rep = None
-            return
-        L = int(layer)
-        if L < 0:
-            L = len(hs) - 1
-        if L >= len(hs):
-            L = len(hs) - 1
-        h = hs[L]  # [1, T, H]
-        v = h[0, int(pos_full), :].detach().to("cpu", dtype=torch.float32)
-        rep = v.numpy()
-
-    orig_device = next(model.parameters()).device
-    try:
-        if hs_device in ("auto", "npu") and is_npu():
-            _forward_on(orig_device)
-        elif hs_device in ("auto", "cuda") and torch.cuda.is_available():
-            _forward_on(orig_device)
-        else:
-            if orig_device.type != "cpu":
-                model.to("cpu")
-            _forward_on(torch.device("cpu"))
-    except _oom_exception_types():
-        if hs_device in ("cuda", "npu"):
-            return None
-        empty_device_cache()
-        try:
-            model.to("cpu")
-            _forward_on(torch.device("cpu"))
-        except Exception:
-            return None
-    finally:
-        if next(model.parameters()).device != orig_device:
-            model.to(orig_device)
-
-    if rep is None:
-        return None
-    return rep.astype(np.float32)
-
 
 def safe_predict_proba_1(clf, x_1d: np.ndarray) -> float:
     X = x_1d.reshape(1, -1)
@@ -420,10 +361,24 @@ def load_model_and_tokenizer(args, device):
     model.eval()
     return model, tokenizer, dtype
 
+# ------------------------
+# Streaming generation with optional clf-based insertion
+# ------------------------
 
-# ★★★ 新增：自定义逐步采样（与HF generate的do_sample+top_p+temperature一致口径）
+def _hidden_state_to_np(hidden_states, layer: int):
+    if not hidden_states:
+        return None
+    L = int(layer)
+    if L < 0:
+        L = len(hidden_states) - 1
+    if L >= len(hidden_states):
+        L = len(hidden_states) - 1
+    h = hidden_states[L]  # [1, T, H] (T is usually 1 here)
+    v = h[0, -1, :].detach().to("cpu", dtype=torch.float32)
+    return v.numpy()
+
 @torch.no_grad()
-def sample_with_tracking(
+def generate_with_clf_insert(
     model,
     input_ids: torch.Tensor,
     attention_mask: torch.Tensor,
@@ -431,59 +386,130 @@ def sample_with_tracking(
     temperature: float,
     top_p: float,
     eos_token_id: int,
-    dtype: torch.dtype,
-    device: torch.device
+    stop_ids: set,
+    insert_ids: torch.Tensor,
+    insert_clf,
+    meta,
+    clf_layer: int,
+    clf_thr: float,
+    insert_on_pred1: bool,
+    hs_device: str,
 ):
     """
-    返回：
-      generated_ids: 仅新增生成部分的token ids（[T]）
-      token_logprobs: 与generated_ids对齐的每步logprob（list[float]）
+    Streaming decode with KV cache:
+      - Check stop token ids during generation
+      - Run clf at stop tokens (using the current-step hidden state)
+      - Optionally insert `insert_ids` once, then continue w/o further stop checks
+    Returns: full_ids, inserted, insert_step, checkpoints
     """
-    token_logprobs = []
-    generated = []
-    past_key_values = None
+    device = input_ids.device
+    if attention_mask is None:
+        attention_mask = torch.ones_like(input_ids, device=device)
 
-    # 先用整段prompt预填，建立KV cache（不会改变生成逻辑）
-    with torch.inference_mode():
-        outputs = model(input_ids=input_ids, attention_mask=attention_mask, use_cache=True, past_key_values=None)
-        past_key_values = outputs.past_key_values
+    # Prefill once
+    outputs = model(
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+        use_cache=True,
+        return_dict=True,
+    )
+    past_key_values = outputs.past_key_values
+    last_logits = outputs.logits[:, -1, :]
 
-    # 迭代采样
-    cur_len = 0
-    last_token = None
-    for _ in range(max_new_tokens):
-        with torch.inference_mode():
-            if last_token is None:
-                # 第一轮：基于prompt最后位置的logits
-                logits = outputs.logits[:, -1, :]
-            else:
-                # 后续只喂入上一步生成的token，复用KV
-                out = model(
-                    input_ids=last_token,  # [1,1]
-                    attention_mask=None,
-                    use_cache=True,
-                    past_key_values=past_key_values,
-                )
-                past_key_values = out.past_key_values
-                logits = out.logits[:, -1, :]
+    remaining = int(max_new_tokens)
+    inserted = False
+    insert_step = None
+    checkpoints = []
+    full_ids = input_ids
 
-        # 采样一步（top-p + temperature）
-        next_token, next_logprob = top_p_sampling_step(logits, temperature, top_p, output_logprobs=False)
-        token_logprobs.append(next_logprob)
+    while remaining > 0:
+        # Sample next token
+        next_token, _ = top_p_sampling_step(last_logits, temperature, top_p, output_logprobs=False)
+        last_id = int(next_token.item())
 
-        # 结束条件
-        if eos_token_id is not None and next_token.item() == eos_token_id:
-            generated.append(next_token.item())
+        # Update full sequence (for decoding only)
+        full_ids = torch.cat([full_ids, next_token], dim=1)
+        if attention_mask is not None:
+            attention_mask = torch.cat(
+                [attention_mask, torch.ones_like(next_token, device=device)],
+                dim=1
+            )
+
+        remaining -= 1
+
+        check_stop = (not inserted) and (last_id in stop_ids)
+        need_clf = check_stop and (insert_clf is not None) and (meta is not None)
+
+        # Advance cache for next step; fetch hidden state only when needed
+        out = model(
+            input_ids=next_token,
+            attention_mask=attention_mask,
+            use_cache=True,
+            past_key_values=past_key_values,
+            output_hidden_states=need_clf,
+            return_dict=True,
+        )
+        past_key_values = out.past_key_values
+        last_logits = out.logits[:, -1, :]
+
+        if eos_token_id is not None and last_id == eos_token_id:
             break
 
-        generated.append(next_token.item())
-        last_token = next_token  # [1,1]
-        cur_len += 1
+        if check_stop:
+            pos_full = int(full_ids.shape[-1] - 1)
+            ck = {
+                "step": len(checkpoints),
+                "pos_full": pos_full,
+                "last_token_id": last_id,
+                "remaining_after": int(remaining),
+                "clf_used": False,
+                "clf_proba": None,
+                "clf_pred": None,
+                "do_insert": False,
+                "reason": None,
+            }
 
-    if len(generated) == 0:
-        return torch.empty(0, dtype=torch.long, device=device), []
+            do_insert = False
+            if need_clf:
+                rep = _hidden_state_to_np(out.hidden_states, clf_layer)
+                proba = safe_predict_proba_1(insert_clf, rep)
+                pred1 = (proba >= clf_thr)
+                do_insert = bool(pred1) if insert_on_pred1 else (not bool(pred1))
+                ck.update({
+                    "clf_used": True,
+                    "clf_proba": float(proba),
+                    "clf_pred": int(pred1),
+                    "do_insert": bool(do_insert),
+                    "reason": "clf_ok",
+                })
+            else:
+                ck["reason"] = "no_clf_or_already_inserted"
 
-    return torch.tensor(generated, dtype=torch.long, device=device), token_logprobs
+            checkpoints.append(ck)
+
+            if do_insert and insert_ids is not None and insert_ids.numel() > 0:
+                full_ids = torch.cat([full_ids, insert_ids], dim=1)
+                if attention_mask is not None:
+                    attention_mask = torch.cat(
+                        [attention_mask, torch.ones_like(insert_ids, device=device)],
+                        dim=1
+                    )
+                inserted = True
+                insert_step = ck["step"]
+
+                # Feed insert tokens once to update cache/logits
+                out = model(
+                    input_ids=insert_ids,
+                    attention_mask=attention_mask,
+                    use_cache=True,
+                    past_key_values=past_key_values,
+                    output_hidden_states=False,
+                    return_dict=True,
+                )
+                past_key_values = out.past_key_values
+                last_logits = out.logits[:, -1, :]
+
+    return full_ids, inserted, insert_step, checkpoints
 
 # ------------------------
 # Core worker
@@ -524,6 +550,15 @@ def worker(args, rank, world_size, local_rank, device):
     clf_layer = int(args.clf_layer) if args.clf_layer is not None else meta_best_layer
     clf_thr = float(args.clf_prob_threshold) if args.clf_prob_threshold is not None else meta_thr
     insert_on_pred1 = True if args.insert_on_pred1 else True
+
+    # Pre-tokenize insert text once (if provided)
+    insert_ids = None
+    if args.insert_text:
+        insert_ids = tokenizer(
+            args.insert_text,
+            add_special_tokens=False,
+            return_tensors="pt",
+        )["input_ids"].to(device)
 
     # Load steer vector
     steer_vector = torch.load(args.steer_vector_path, map_location="cpu").to(device, dtype=dtype)
@@ -587,104 +622,29 @@ def worker(args, rank, world_size, local_rank, device):
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
         try:
-            with torch.no_grad():
-                def _generate(_input_ids: torch.Tensor, max_new_tokens: int, stopping):
-                    _kwargs = dict(
-                        do_sample=True,
-                        temperature=args.temperature,
-                        top_p=args.top_p,
-                        max_new_tokens=int(max_new_tokens),
-                        return_dict_in_generate=True,
-                        pad_token_id=tokenizer.eos_token_id,
-                    )
-                    if stopping is not None:
-                        _kwargs["stopping_criteria"] = stopping
-
-                    attn = torch.ones_like(_input_ids, device=_input_ids.device)
-                    return model.generate(input_ids=_input_ids, attention_mask=attn, **_kwargs)
-
-                remaining = int(args.max_generated_tokens)
-                full_ids = inputs["input_ids"]  # [1, T]
-                inserted = False
-                insert_step = None
-                checkpoints = []
-
-                while remaining > 0:
-                    cur_len = int(full_ids.shape[-1])
-                    stopping = StoppingCriteriaList([StopOnTokenIdSet(stop_ids, prompt_len=cur_len)])
-                    gen = _generate(full_ids, remaining, stopping)
-                    seq = gen.sequences
-                    new_len = int(seq.shape[-1] - cur_len)
-                    if new_len <= 0:
-                        full_ids = seq
-                        break
-
-                    remaining -= new_len
-                    full_ids = seq
-
-                    last_id = int(full_ids[0, -1])
-                    if last_id not in stop_ids:
-                        break
-
-                    pos_full = int(full_ids.shape[-1] - 1)
-                    ck = {
-                        "step": len(checkpoints),
-                        "pos_full": pos_full,
-                        "last_token_id": last_id,
-                        "remaining_after": int(remaining),
-                        "clf_used": False,
-                        "clf_proba": None,
-                        "clf_pred": None,
-                        "do_insert": False,
-                        "reason": None,
-                    }
-
-                    do_insert = False
-                    if (not inserted) and (insert_clf is not None) and (meta is not None):
-                        rep = extract_feature_at_pos(
-                            model=model,
-                            full_ids_1xT=full_ids,
-                            hs_device=args.hs_device,
-                            layer=clf_layer,
-                            pos_full=pos_full,
-                        )
-                        if rep is not None:
-                            proba = safe_predict_proba_1(insert_clf, rep)
-                            pred1 = (proba >= clf_thr)
-                            do_insert = bool(pred1) if insert_on_pred1 else (not bool(pred1))
-                            ck.update({
-                                "clf_used": True,
-                                "clf_proba": float(proba),
-                                "clf_pred": int(pred1),
-                                "do_insert": bool(do_insert),
-                                "reason": "clf_ok",
-                            })
-                        else:
-                            ck["reason"] = "clf_rep_none"
-                    else:
-                        ck["reason"] = "no_clf_or_already_inserted"
-
-                    checkpoints.append(ck)
-
-                    if do_insert and (args.insert_text or ""):
-                        insert_ids = tokenizer(
-                            args.insert_text,
-                            add_special_tokens=False,
-                            return_tensors="pt",
-                        )["input_ids"].to(device)
-                        full_ids = torch.cat([full_ids, insert_ids], dim=1)
-                        inserted = True
-                        insert_step = ck["step"]
-
-                        if remaining > 0:
-                            gen_tail = _generate(full_ids, remaining, stopping=None)
-                            full_ids = gen_tail.sequences
-                        break
-
-                response_text = tokenizer.decode(
-                    full_ids[0, inputs["input_ids"].shape[-1]:],
-                    skip_special_tokens=True,
+            with torch.inference_mode():
+                full_ids, inserted, insert_step, checkpoints = generate_with_clf_insert(
+                    model=model,
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs.get("attention_mask"),
+                    max_new_tokens=int(args.max_generated_tokens),
+                    temperature=args.temperature,
+                    top_p=args.top_p,
+                    eos_token_id=tokenizer.eos_token_id,
+                    stop_ids=stop_ids,
+                    insert_ids=insert_ids,
+                    insert_clf=insert_clf,
+                    meta=meta,
+                    clf_layer=clf_layer,
+                    clf_thr=clf_thr,
+                    insert_on_pred1=insert_on_pred1,
+                    hs_device=args.hs_device,
                 )
+
+            response_text = tokenizer.decode(
+                full_ids[0, inputs["input_ids"].shape[-1]:],
+                skip_special_tokens=True,
+            )
 
         except _oom_exception_types():
             print(f"[OOM][rank {rank}] Skipping idx={i} : {qtext}...")
