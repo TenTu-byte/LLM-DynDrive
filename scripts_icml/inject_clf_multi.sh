@@ -80,7 +80,7 @@ for ds in "${datasets[@]}"; do
 				--tau $tau \
 				--insert_text "\n[unused17]\n\n" \
 				--hs_device auto \
-				--clf "$outputs/icml/openPangu-Embedded-7B-V1.1/Math_Math/classifer/remain_clf_allk/remain_clf.joblib" \
-				--meta "$outputs/icml/openPangu-Embedded-7B-V1.1/Math_Math/classifer/remain_clf_allk/remain_clf_meta.json"
+				--clf "$outputs/icml/openPangu-Embedded-7B-V1.1/Math_Math/classifer/remain_clf_allk/remain_clf_qmax${q_max}.joblib" \
+				--meta "$outputs/icml/openPangu-Embedded-7B-V1.1/Math_Math/classifer/remain_clf_allk/remain_clf_meta_qmax${q_max}.json"
     echo "=== Finished ${ds} ==="
 done
