@@ -143,9 +143,14 @@ def build_output_paths(args):
     # Optional tau
     if args.tau is not None:
         components.append(f"tau_{args.tau}")
-
+    
+    # Optional clf + meta
     if getattr(args, "clf", "") and getattr(args, "meta", ""):
         components.append("clf")
+    
+    # Optional q_max
+    if args.q_max is not None:
+        components.append(f"qmax{args.q_max}")
     
     base_name = "_".join(components)
     return output_dir, base_name
@@ -919,6 +924,7 @@ def main():
                         help="pred1=>insert. Default behavior is pred1=>insert even if not set.")
     parser.add_argument("--k", type=int, default=1, help="Value of k for pass@k calculation")
     parser.add_argument("--split", type=str, default="test")
+    parser.add_argument('--q_max', type=float, default=None, help="q_max for injection")
     args = parser.parse_args()
 
     set_seed(args.seed)
