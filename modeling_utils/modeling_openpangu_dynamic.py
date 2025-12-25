@@ -699,7 +699,8 @@ class PanguEmbeddedForCausalLM(PanguEmbeddedPreTrainedModel, GenerationMixin):
                 # self.steering_think_flag=torch.zeros(input_ids.shape[0], device=input_ids.device).to(torch.bool)
                 self.steering_think_flag = (input_ids==self.steering_think_start_id).sum(1).to(torch.bool)
             else:
-                assert input_ids.shape[1]==1, "use cache"
+                pass  # ! test for injection
+                # assert input_ids.shape[1]==1, "use cache"
             last_tokens = input_ids[:,-1]
             self.steering_think_flag = torch.logical_or(self.steering_think_flag, last_tokens==self.steering_think_start_id)
             self.steering_think_flag = torch.logical_and(self.steering_think_flag, last_tokens!=self.steering_think_end_id)
