@@ -691,10 +691,6 @@ def worker(args, rank, world_size, local_rank, device):
             empty_device_cache()
             pbar.update(1)
             continue
-        except Exception as e:
-            print(f"[ERROR][rank {rank}] idx={i} : {e}")
-            pbar.update(1)
-            continue
 
         result = {
             "idx": i,  # store idx for robust checkpointing
