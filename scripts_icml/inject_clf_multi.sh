@@ -67,7 +67,7 @@ for ds in "${datasets[@]}"; do
 				--model_name_or_path "$models/openPangu-Embedded-7B-V1.1" \
 				--dataset_dir "./Data/" \
 				--dataset "$ds" \
-				--output_path "$outputs/beta/outputs_steer_dynamic_clf_multicheck" \
+				--output_path "$outputs/beta/outputs_steer_dynamic_clf_multicheck/no_escape" \
 				--steer_vector_path "$outputs/beta/openPangu-Embedded-7B-V1.1/Math_Math/steer_vector_layer${steer_layer}_conf_mixed.pt" \
 				--steer_layer $steer_layer \
 				--steer_coef -1 \
