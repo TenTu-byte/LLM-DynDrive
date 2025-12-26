@@ -113,6 +113,10 @@ def build_output_paths(args):
     # Optional q_max tag
     if getattr(args, "q_max", None) is not None:
         components.append(f"qmax{args.q_max}")
+    
+    # Optional insert_after_n tag
+    if args.insert_after_n > 1:
+        components.append(f"insertAfter{args.insert_after_n}")
 
     base_name = "_".join(components)
     return output_dir, base_name
