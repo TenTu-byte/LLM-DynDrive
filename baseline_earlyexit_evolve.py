@@ -424,6 +424,7 @@ def worker(args, rank, world_size, local_rank, device):
     dynamic_budget = None
     bootstrap_sum = 0
     bootstrap_count = 0
+    bootstrap_n = 0
 
     def _compute_dynamic_budget(avg_len: float) -> int:
         raw = avg_len * (args.dynamic_budget_m / 100.0)
@@ -441,41 +442,9 @@ def worker(args, rank, world_size, local_rank, device):
     if (args.token_budget is not None and args.token_budget > 0) or dynamic_enabled:
         think_end_ids = tokenizer.encode("\n[unused17]\n\n", add_special_tokens=False)
 
-    # 自动划分样本（不再手写 i % world_size）
-    sampler = DistributedSampler(
-        list(range(N)),
-        num_replicas=world_size,
-        rank=rank,
-        shuffle=False,
-        drop_last=False
-    )
-    sampler.set_epoch(0)
-    raw_idx = list(iter(sampler))
-    # 去重以防 padding
-    seen, my_indices = set(), []
-    for i in raw_idx:
-        if i < N and i not in seen:
-            seen.add(i)
-            my_indices.append(i)
-
-    if rank == 0:
-        print(f"[rank {rank}] world_size = {world_size}")
-        print(f"[rank {rank}] output_dir = {output_dir}")
-
-    print(f"[rank {rank}] shard_file = {shard_file}")
-    print(f"[rank {rank}] loaded existing: idx={len(existing_idx_global)}, question={len(existing_q_global)}")
-    print(f"[rank {rank}] will process {len(my_indices)} items")
-
-    pbar = tqdm(total=len(my_indices), desc=f"Rank {rank} DP Inference", position=rank, leave=True)
-
-    for i in my_indices:
+    def _run_generation(i, current_think_budget):
         q = questions[i]
         qtext = q.get("problem", "")
-
-        # 断点恢复：若已存在则跳过
-        if (i in existing_idx_global) or (qtext in existing_q_global):
-            pbar.update(1)
-            continue
 
         messages = [
             {"role": "system", "content": "Please reason step by step, and put your final answer within \\boxed{}."},
@@ -483,10 +452,6 @@ def worker(args, rank, world_size, local_rank, device):
         ]
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
-
-        current_think_budget = think_budget
-        if dynamic_enabled and dynamic_budget is not None:
-            current_think_budget = dynamic_budget
 
         try:
             with torch.inference_mode():
@@ -508,8 +473,7 @@ def worker(args, rank, world_size, local_rank, device):
         except torch.npu.OutOfMemoryError:
             print(f"[OOM][rank {rank}] Skipping idx={i} : {qtext}...")
             empty_device_cache()
-            pbar.update(1)
-            continue
+            return None
 
         full_ids = torch.cat([inputs["input_ids"][0], gen_ids], dim=0)
         response_text = tokenizer.decode(
@@ -517,18 +481,119 @@ def worker(args, rank, world_size, local_rank, device):
             skip_special_tokens=True
         )
 
-        if dynamic_enabled and dynamic_budget is None:
-            gen_len = int(gen_ids.numel())
-            bootstrap_sum += gen_len
-            bootstrap_count += 1
-            if bootstrap_count >= args.dynamic_budget_n:
-                avg_len = bootstrap_sum / bootstrap_count if bootstrap_count else 0.0
+        gen_len = int(gen_ids.numel())
+
+        del inputs, gen_ids
+        empty_device_cache()
+        return q, qtext, response_text, gen_len
+
+    if dynamic_enabled:
+        bootstrap_n = min(args.dynamic_budget_n, N)
+        if rank == 0 and bootstrap_n > 0:
+            bootstrap_pbar = tqdm(
+                total=bootstrap_n,
+                desc=f"Rank {rank} Bootstrap",
+                position=rank,
+                leave=True
+            )
+            for i in range(bootstrap_n):
+                out = _run_generation(i, think_budget)
+                bootstrap_pbar.update(1)
+                if out is None:
+                    continue
+                q, qtext, response_text, gen_len = out
+
+                bootstrap_sum += gen_len
+                bootstrap_count += 1
+
+                if (i in existing_idx_global) or (qtext in existing_q_global):
+                    continue
+
+                result = {
+                    "idx": i,
+                    "question": qtext,
+                    "generated_responses": [response_text],
+                    "gold_answer": q.get("answer", ""),
+                    "metadata": {
+                        "think_budget": think_budget,
+                        "used_dynamic_budget": dynamic_budget,
+                    }
+                }
+
+                with open(shard_file, 'a', encoding='utf-8') as f:
+                    f.write(json.dumps(result, ensure_ascii=False) + '\n')
+            bootstrap_pbar.close()
+
+            if bootstrap_count > 0:
+                avg_len = bootstrap_sum / bootstrap_count
                 dynamic_budget = _compute_dynamic_budget(avg_len)
-                if rank == 0:
-                    print(
-                        f"[rank 0] dynamic budget set to {dynamic_budget} "
-                        f"(avg_len={avg_len:.2f}, m={args.dynamic_budget_m}%)"
-                    )
+                print(
+                    f"[rank 0] dynamic budget set to {dynamic_budget} "
+                    f"(avg_len={avg_len:.2f}, m={args.dynamic_budget_m}%)"
+                )
+            else:
+                print("[rank 0] [WARN] dynamic budget not set (bootstrap_count=0).")
+
+        if dist.is_initialized():
+            budget_value = dynamic_budget if dynamic_budget is not None else -1
+            budget_tensor = torch.tensor([budget_value], device=device, dtype=torch.long)
+            dist.broadcast(budget_tensor, src=0)
+            if rank != 0:
+                dynamic_budget = int(budget_tensor.item())
+                if dynamic_budget < 0:
+                    dynamic_budget = None
+
+    if dynamic_enabled:
+        remaining_indices = list(range(bootstrap_n, N))
+    else:
+        remaining_indices = list(range(N))
+
+    # 自动划分样本（不再手写 i % world_size）
+    if remaining_indices:
+        sampler = DistributedSampler(
+            list(range(len(remaining_indices))),
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=False,
+            drop_last=False
+        )
+        sampler.set_epoch(0)
+        raw_idx = list(iter(sampler))
+        # 去重以防 padding
+        seen, my_indices = set(), []
+        for pos in raw_idx:
+            if pos < len(remaining_indices) and pos not in seen:
+                seen.add(pos)
+                my_indices.append(remaining_indices[pos])
+    else:
+        my_indices = []
+
+    if rank == 0:
+        print(f"[rank {rank}] world_size = {world_size}")
+        print(f"[rank {rank}] output_dir = {output_dir}")
+
+    print(f"[rank {rank}] shard_file = {shard_file}")
+    print(f"[rank {rank}] loaded existing: idx={len(existing_idx_global)}, question={len(existing_q_global)}")
+    print(f"[rank {rank}] will process {len(my_indices)} items")
+
+    pbar = tqdm(total=len(my_indices), desc=f"Rank {rank} DP Inference", position=rank, leave=True)
+
+    for i in my_indices:
+        q = questions[i]
+        qtext = q.get("problem", "")
+
+        # 断点恢复：若已存在则跳过
+        if (i in existing_idx_global) or (qtext in existing_q_global):
+            pbar.update(1)
+            continue
+
+        current_think_budget = dynamic_budget if dynamic_enabled else think_budget
+
+        out = _run_generation(i, current_think_budget)
+        if out is None:
+            pbar.update(1)
+            continue
+        q, qtext, response_text, _gen_len = out
 
         result = {
             "idx": i,
@@ -544,8 +609,6 @@ def worker(args, rank, world_size, local_rank, device):
         with open(shard_file, 'a', encoding='utf-8') as f:
             f.write(json.dumps(result, ensure_ascii=False) + '\n')
 
-        del inputs, gen_ids
-        empty_device_cache()
         pbar.update(1)
 
     pbar.close()
