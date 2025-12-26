@@ -337,6 +337,7 @@ def generate_with_clf_insert(
     clf_thr: float,
     insert_on_pred1: bool,
     hs_device: str,
+    insert_after_n: int,
 ):
     """
     Streaming decode with KV cache:
@@ -364,6 +365,8 @@ def generate_with_clf_insert(
     insert_step = None
     checkpoints = []
     full_ids = input_ids
+    success_count = 0
+    insert_after_n = max(1, int(insert_after_n))
 
     while remaining > 0:
         # Sample next token
@@ -409,6 +412,7 @@ def generate_with_clf_insert(
                 "clf_proba": None,
                 "clf_pred": None,
                 "do_insert": False,
+                "clf_success_count": success_count,
                 "reason": None,
             }
 
@@ -417,12 +421,16 @@ def generate_with_clf_insert(
                 rep = _hidden_state_to_np(out.hidden_states, clf_layer)
                 proba = safe_predict_proba_1(insert_clf, rep)
                 pred1 = (proba >= clf_thr)
-                do_insert = bool(pred1) if insert_on_pred1 else (not bool(pred1))
+                pred_ok = bool(pred1) if insert_on_pred1 else (not bool(pred1))
+                if pred_ok:
+                    success_count += 1
+                do_insert = pred_ok and (success_count >= insert_after_n)
                 ck.update({
                     "clf_used": True,
                     "clf_proba": float(proba),
                     "clf_pred": int(pred1),
                     "do_insert": bool(do_insert),
+                    "clf_success_count": success_count,
                     "reason": "clf_ok",
                 })
             else:
@@ -618,6 +626,7 @@ def worker(args, rank, world_size, local_rank, device):
                         clf_thr=clf_thr,
                         insert_on_pred1=insert_on_pred1,
                         hs_device=args.hs_device,
+                        insert_after_n=args.insert_after_n,
                     )
                 else:
                     output = model.generate(
@@ -866,6 +875,8 @@ def main():
     parser.add_argument("--clf_prob_threshold", type=float, default=None, help="Override meta.prob_threshold")
     parser.add_argument("--insert_on_pred1", action="store_true",
                         help="pred1=>insert. Default behavior is pred1=>insert even if not set.")
+    parser.add_argument("--insert_after_n", type=int, default=1,
+                        help="Inject only after N successful clf hits on \n\n tokens.")
     parser.add_argument('--q_max', type=float, default=None, help="q_max for injection")
     parser.add_argument("--k", type=int, default=1, help="Value of k for pass@k calculation")
     parser.add_argument("--split", type=str, default="test")

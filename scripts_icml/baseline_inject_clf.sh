@@ -74,6 +74,7 @@ for ds in "${datasets[@]}"; do
 				--hs_device auto \
 				--clf "$outputs/icml/openPangu-Embedded-7B-V1.1/Math_Math/classifer/remain_clf_allk/remain_clf_qmax${q_max}.joblib" \
 				--meta "$outputs/icml/openPangu-Embedded-7B-V1.1/Math_Math/classifer/remain_clf_allk/remain_clf_meta_qmax${q_max}.json" \
-				--q_max $q_max
+				--q_max $q_max \
+				--insert_after_n $insert_after_n
     echo "=== Finished ${ds} ==="
 done
