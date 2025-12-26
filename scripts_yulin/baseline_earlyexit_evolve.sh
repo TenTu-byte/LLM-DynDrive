@@ -69,6 +69,8 @@ for ds in "${datasets[@]}"; do
         --output_path "$outputs/outputs_baseline_earlyexit_evolve" \
         --max_generated_tokens $max_tokens \
         --token_budget $token_budget \
+        --dynamic_budget_n $dynamic_budget_n \
+        --dynamic_budget_m $dynamic_budget_m \
         --seed $seed
     echo "=== Finished ${ds} ==="
 done

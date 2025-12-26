@@ -96,9 +96,20 @@ def build_output_paths(args):
     # Always include max_generated_tokens
     components.append(f"maxlen{args.max_generated_tokens}")
 
+    dynamic_enabled = (
+        args.dynamic_budget_n is not None
+        and args.dynamic_budget_n > 0
+    )
+
     # Optional token_budget (early-exit)
-    if args.token_budget is not None:
+    if args.token_budget is not None and not dynamic_enabled:
         components.append(f"tbudget{args.token_budget}")
+
+    # Optional dynamic budget params
+    if args.dynamic_budget_n is not None and dynamic_enabled:
+        components.append(f"dynN{args.dynamic_budget_n}")
+    if args.dynamic_budget_m is not None and dynamic_enabled:
+        components.append(f"dynM{args.dynamic_budget_m}")
     
     # Always include seed
     components.append(f"seed{args.seed}")
@@ -401,12 +412,33 @@ def worker(args, rank, world_size, local_rank, device):
     # Model & tokenizer
     model, tokenizer, dtype = load_model_and_tokenizer(args, device)
 
+    dynamic_enabled = (
+        args.dynamic_budget_n is not None
+        and args.dynamic_budget_n > 0
+    )
+    if dynamic_enabled and args.dynamic_budget_m is None:
+        raise ValueError("--dynamic_budget_m is required when dynamic_budget_n>0.")
+    if dynamic_enabled and args.token_budget is not None and rank == 0:
+        print("[rank 0] [INFO] dynamic budget enabled; ignoring --token_budget during sampling.")
+
+    dynamic_budget = None
+    bootstrap_sum = 0
+    bootstrap_count = 0
+
+    def _compute_dynamic_budget(avg_len: float) -> int:
+        raw = avg_len * (args.dynamic_budget_m / 100.0)
+        budget = int(round(raw))
+        if budget > args.max_generated_tokens:
+            budget = args.max_generated_tokens
+        return budget
+
     think_budget = None
     answer_budget = None
     think_end_ids = None
-    if args.token_budget is not None and args.token_budget > 0:
+    if args.token_budget is not None and args.token_budget > 0 and not dynamic_enabled:
         think_budget = int(args.token_budget)
         # answer_budget = max(1, think_budget // 4)  # optional
+    if (args.token_budget is not None and args.token_budget > 0) or dynamic_enabled:
         think_end_ids = tokenizer.encode("\n[unused17]\n\n", add_special_tokens=False)
 
     # 自动划分样本（不再手写 i % world_size）
@@ -452,6 +484,10 @@ def worker(args, rank, world_size, local_rank, device):
         prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
         inputs = tokenizer(prompt, return_tensors="pt").to(device)
 
+        current_think_budget = think_budget
+        if dynamic_enabled and dynamic_budget is not None:
+            current_think_budget = dynamic_budget
+
         try:
             with torch.inference_mode():
                 gen_ids, _step_logprobs = sample_with_tracking(
@@ -464,7 +500,7 @@ def worker(args, rank, world_size, local_rank, device):
                     eos_token_id=tokenizer.eos_token_id,
                     dtype=dtype,
                     device=device,
-                    think_budget=think_budget,
+                    think_budget=current_think_budget,
                     answer_budget=answer_budget,
                     think_end_ids=think_end_ids,
                     output_logprobs=False
@@ -481,11 +517,28 @@ def worker(args, rank, world_size, local_rank, device):
             skip_special_tokens=True
         )
 
+        if dynamic_enabled and dynamic_budget is None:
+            gen_len = int(gen_ids.numel())
+            bootstrap_sum += gen_len
+            bootstrap_count += 1
+            if bootstrap_count >= args.dynamic_budget_n:
+                avg_len = bootstrap_sum / bootstrap_count if bootstrap_count else 0.0
+                dynamic_budget = _compute_dynamic_budget(avg_len)
+                if rank == 0:
+                    print(
+                        f"[rank 0] dynamic budget set to {dynamic_budget} "
+                        f"(avg_len={avg_len:.2f}, m={args.dynamic_budget_m}%)"
+                    )
+
         result = {
             "idx": i,
             "question": qtext,
             "generated_responses": [response_text],
-            "gold_answer": q.get("answer", "")
+            "gold_answer": q.get("answer", ""),
+            "metadata": {
+                "think_budget": current_think_budget,
+                "used_dynamic_budget": dynamic_budget,
+            }
         }
 
         with open(shard_file, 'a', encoding='utf-8') as f:
@@ -682,6 +735,8 @@ def main():
     parser.add_argument('--top_p', type=float, default=0.95)
     parser.add_argument('--max_generated_tokens', type=int, default=16000)
     parser.add_argument('--token_budget', type=int, default=None)
+    parser.add_argument('--dynamic_budget_n', type=int, default=None)
+    parser.add_argument('--dynamic_budget_m', type=float, default=None)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument("--k", type=int, default=1, help="Value of k for pass@k calculation")
     parser.add_argument("--split", type=str, default="test")
