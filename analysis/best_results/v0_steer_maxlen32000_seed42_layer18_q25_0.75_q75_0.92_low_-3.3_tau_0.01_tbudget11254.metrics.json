@@ -1,0 +1,19 @@
+{
+  "dataset": "Math_AIME2025",
+  "split": "test",
+  "total": 30,
+  "generated": 30,
+  "correct": 24,
+  "accuracy": 0.8,
+  "k": 1,
+  "pass@1": 0.8,
+  "is_complete": true,
+  "token_stats": {
+    "samples": 30,
+    "avg_word_count": 5641.166666666667,
+    "avg_full_token_count": 9668.666666666666,
+    "avg_think_token_count": 7614.466666666666,
+    "think_found": 30,
+    "think_fallback_full": 0
+  }
+}
